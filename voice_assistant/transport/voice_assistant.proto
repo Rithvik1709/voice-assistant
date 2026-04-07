@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package voice_assistant;
+
+message AudioChunk {
+  bytes pcm16 = 1;
+  int32 sample_rate = 2;
+  int64 timestamp_ms = 3;
+}
+
+message TextEvent {
+  string type = 1;
+  string text = 2;
+  float confidence = 3;
+  int64 timestamp_ms = 4;
+}
+
+message AudioResponse {
+  bytes pcm16 = 1;
+  int32 sample_rate = 2;
+  int64 timestamp_ms = 3;
+  string debug_text = 4;
+}
+
+service VoiceAssistant {
+  rpc StreamVoice(stream AudioChunk) returns (stream AudioResponse);
+}
