@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-assistant"
+version = "0.1.0"
+description = "Real-time streaming voice assistant with ASR, LLM token streaming, and chunked TTS"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "voice-assistant" }]
+dependencies = [
+  "python-dotenv>=1.0.1",
+  "numpy>=1.26.4",
+  "sounddevice>=0.4.6",
+  "webrtcvad>=2.0.10",
+  "silero-vad>=5.1.2",
+  "vosk>=0.3.45",
+  "llama-cpp-python>=0.3.0",
+  "grpcio>=1.62.0",
+  "grpcio-tools>=1.62.0",
+  "aiortc>=1.7.0",
+  "pytest>=8.0.0"
+]
+
+[project.optional-dependencies]
+cuda = ["llama-cpp-python[cuda]>=0.3.0"]
+metal = ["llama-cpp-python[metal]>=0.3.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["voice_assistant*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
