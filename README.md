@@ -69,8 +69,8 @@ This project utilizes **Piper TTS** for sentence-chunked, non-blocking audio gen
 3. Open your `.env` file and update the paths to point to your files:
 
 ```env
-LLM_MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
-TTS_MODEL_PATH="models/en_US-lessac-medium.onnx"
+MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
+PIPER_VOICE="models/en_US-lessac-medium.onnx"
 
 ## gRPC mode
 
