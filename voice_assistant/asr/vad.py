@@ -24,6 +24,7 @@ class VADConfig:
     frame_ms: int = 30
     aggressiveness: int = 2
     speech_frames_trigger: int = 3
+    threshold: float = 0.3  # <-- ADD THIS LINE (Lower threshold catches more speech)
     mode: str = "webrtc"  # webrtc | silero | energy
 
 
@@ -44,7 +45,7 @@ class VoiceActivityDetector:
             if load_silero_vad is None or VADIterator is None:
                 raise RuntimeError("silero-vad is not installed")
             model = load_silero_vad()
-            self._silero_iter = VADIterator(model, sampling_rate=config.sample_rate)
+            self._silero_iter = VADIterator(model, threshold=config.threshold, sampling_rate=config.sample_rate)
 
     def is_speech(self, pcm16: bytes) -> bool:
         if len(pcm16) != self.frame_bytes:
