@@ -12,15 +12,17 @@ authors = [{ name = "voice-assistant" }]
 dependencies = [
     # --- Core Utilities ---
     "python-dotenv>=1.0.1",      # Manages environment variables
+    # --- Core Utilities ---
+    "python-dotenv>=1.0.1",      # Manages environment variables
 
-    # --- Audio Processing & VAD ---
+    # --- Audio Processing & Playback ---
     "sounddevice>=0.4.6",        # High-quality audio input/output
     "numpy>=1.26.4",              # Handles audio data as arrays
     "webrtcvad>=2.0.10",         # WebRTC Voice Activity Detector
     "silero-vad>=5.1.2",          # Silero Voice Activity Detector
 
     # --- AI & Machine Learning Inference ---
-    "vosk>=0.3.45",               # Offline ASR engine (Speech-to-Text)
+    "vosk>=0.3.45",               # Offline ASR engine
     "llama-cpp-python>=0.3.0",    # Local LLM runner (GGUF support)
 
     # --- Transport & Remote Inference (gRPC) ---
