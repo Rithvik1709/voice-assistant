@@ -1,0 +1,120 @@
+Metadata-Version: 2.4
+Name: voice-assistant
+Version: 0.1.0
+Summary: Real-time streaming voice assistant with ASR, LLM token streaming, and chunked TTS
+Author: voice-assistant
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: python-dotenv>=1.0.1
+Requires-Dist: numpy>=1.26.4
+Requires-Dist: sounddevice>=0.4.6
+Requires-Dist: webrtcvad>=2.0.10
+Requires-Dist: silero-vad>=5.1.2
+Requires-Dist: vosk>=0.3.44
+Requires-Dist: llama-cpp-python>=0.3.0
+Requires-Dist: grpcio>=1.62.0
+Requires-Dist: grpcio-tools>=1.62.0
+Requires-Dist: aiortc>=1.7.0
+Requires-Dist: pytest>=8.0.0
+Provides-Extra: cuda
+Requires-Dist: llama-cpp-python[cuda]>=0.3.0; extra == "cuda"
+Provides-Extra: metal
+Requires-Dist: llama-cpp-python[metal]>=0.3.0; extra == "metal"
+
+# voice-assistant
+
+Low-latency real-time streaming voice assistant pipeline:
+
+Mic → StreamingASR → PartialText → LLM (token streaming) → StreamingTTS → Speaker
+
+## Latency Breakdown (target)
+
+```text
+[Mic frames 20ms] -> [VAD boundary + partial ASR]
+                    ~20-80ms
+              -> [LLM TTFT]
+                    ~60-180ms
+              -> [TTS eager chunk]
+                    ~40-120ms
+              -> [Speaker out]
+                    ~6-20ms
+
+Perceived first-response latency target: < 500ms local
+Default low-latency mode target: sub-100ms perceived updates (ack tone + eager chunking)
+```
+
+## Features
+
+- Chunked ASR with VAD gating and partial/final events
+- Streaming `llama-cpp-python` token callbacks with TTFT instrumentation
+- Speculative decoding helper (draft + target verify)
+- KV-cache reuse between turns via llama state save/load
+- Sentence-chunked Piper TTS synthesis streamed to non-blocking player
+- Low-latency mode defaults: shorter endpointing, eager TTS flush, 128-sample playback blocks
+- Optional immediate acknowledgement tone before LLM completion for sub-100ms perceived feedback
+- Async orchestrator with queue backpressure
+- Barge-in interrupt handling (speech during playback cancels output)
+- gRPC bidirectional streaming mode for remote inference
+- Benchmark metrics: ASR latency, TTFT, TTS first chunk, end-to-end, RTF
+
+## Quickstart (local)
+
+1. Install Python 3.11+.
+2. Install dependencies:
+   - CPU: `pip install -e .`
+   - CUDA: `pip install -e .[cuda]`
+   - Apple Metal: `pip install -e .[metal]`
+3. Copy env:
+   - `cp .env.example .env`
+4. Fill model paths in `.env`.
+5. Run:
+   - `python -m voice_assistant.main --mode local`
+
+## 📂 Model Download & Setup Guide
+
+To run this voice assistant in local mode, you need to download the Large Language Model (LLM) and Text-to-Speech (TTS) files manually and configure their paths.
+
+### 1. Large Language Model (LLM)
+This pipeline uses `llama-cpp-python` for local inference, which requires models in the **GGUF** format.
+* **Recommended Model:** Llama-3-8B-Instruct or Mistral-7B-Instruct.
+* **Where to Download:** Search on Hugging Face (popular repositories include `QuantFactory` or `Bartowski`).
+* **Recommended Quantization:** Download the `Q4_K_M` or `Q5_K_M` version (e.g., `Meta-Llama-3-8B-Instruct-Q4_K_M.gguf`). This provides the best speed-to-performance ratio for low latency.
+
+### 2. Text-to-Speech (TTS) Model
+This project utilizes **Piper TTS** for sentence-chunked, non-blocking audio generation.
+* **Where to Download:** Visit the official Piper voice repository on Hugging Face or GitHub.
+* **Files Needed:** You need both the model file (`.onnx`) and its configuration file (`.json`).
+* **Recommended Voice:** `en_US-lessac-medium.onnx` and `en_US-lessac-medium.onnx.json`.
+
+### 3. Updating your `.env` File
+1. Create a new folder named `models` in the root directory of this project.
+2. Place your downloaded `.gguf`, `.onnx`, and `.json` files inside that folder.
+3. Open your `.env` file and update the paths to point to your files:
+
+```env
+MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
+PIPER_VOICE="models/en_US-lessac-medium.onnx"
+
+## gRPC mode
+
+Generate protobuf stubs once:
+
+- `python -m grpc_tools.protoc -I voice_assistant/transport --python_out=voice_assistant/transport --grpc_python_out=voice_assistant/transport voice_assistant/transport/voice_assistant.proto`
+
+Server:
+
+- `python -m voice_assistant.main --mode server --host 0.0.0.0 --port 50051`
+
+Client:
+
+- `python -m voice_assistant.main --mode client --target localhost:50051`
+
+## Tests
+
+- `pytest -q`
+
+Covers:
+
+- VAD frame/speech boundary behavior
+- Sentence chunking for streaming TTS
+- Speculative decode acceptance rate and fallback logic

@@ -12,7 +12,10 @@ from voice_assistant.tts.player import AudioPlayer
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue
 from voice_assistant.tts.stream import PiperStreamingTTS, sentence_chunks_from_tokens
 
+from opentelemetry import trace
+
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class VoicePipelineOrchestrator:
@@ -59,14 +62,16 @@ class VoicePipelineOrchestrator:
     async def llm_task(self) -> None:
         while True:
             prompt = await self.prompt_queue.get()
-            if self.interrupt_event.is_set():
-                self._drain_queue(self.token_queue)
-                self.interrupt_event.clear()
-            self.bench.mark("prompt_sent_ts")
-            if self.audio_queue.empty():
-                await self._enqueue_ack_tone()
-            await self.llm.stream_tokens(prompt, self.token_queue)
-            await self.token_queue.put("<eos>")
+            with tracer.start_as_current_span("orchestrator.process_prompt") as span:
+                span.set_attribute("prompt.length", len(prompt))
+                if self.interrupt_event.is_set():
+                    self._drain_queue(self.token_queue)
+                    self.interrupt_event.clear()
+                self.bench.mark("prompt_sent_ts")
+                if self.audio_queue.empty():
+                    await self._enqueue_ack_tone()
+                await self.llm.stream_tokens(prompt, self.token_queue)
+                await self.token_queue.put("<eos>")
 
     async def tts_task(self) -> None:
         token_buf: list[str] = []

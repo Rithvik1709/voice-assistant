@@ -73,6 +73,8 @@ async def run_local(settings: Settings) -> None:
 
 async def amain() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    from voice_assistant.telemetry import init_telemetry
+    init_telemetry()
     args = parse_args()
     settings = Settings()
 
