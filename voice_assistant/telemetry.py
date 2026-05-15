@@ -17,8 +17,8 @@ class TelemetryLogFilter(logging.Filter):
             record.trace_id = trace.format_trace_id(ctx.trace_id)
             record.span_id = trace.format_span_id(ctx.span_id)
         else:
-            record.trace_id = "0"
-            record.span_id = "0"
+            record.trace_id = trace.format_trace_id(0)
+            record.span_id = trace.format_span_id(0)
         return True
 
 
