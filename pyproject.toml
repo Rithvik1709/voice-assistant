@@ -10,17 +10,26 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "voice-assistant" }]
 dependencies = [
-  "python-dotenv>=1.0.1",
-  "numpy>=1.26.4",
-  "sounddevice>=0.4.6",
-  "webrtcvad>=2.0.10",
-  "silero-vad>=5.1.2",
-  "vosk>=0.3.45",
-  "llama-cpp-python>=0.3.0",
-  "grpcio>=1.62.0",
-  "grpcio-tools>=1.62.0",
-  "aiortc>=1.7.0",
-  "pytest>=8.0.0"
+    # --- Core Utilities ---
+    "python-dotenv",      # Manages environment variables
+
+    # --- Audio Processing & Playback ---
+    "pyaudio",            # Microphone input streaming
+    "sounddevice",        # High-quality audio output
+    "numpy",              # Handles audio data as arrays
+
+    # --- AI & Machine Learning Inference ---
+    "llama-cpp-python",   # Local LLM runner (GGUF support)
+
+    # --- Transport & Remote Inference (gRPC) ---
+    "grpcio",             # Core gRPC framework
+    "grpcio-tools",       # Tools for generating protobuf stubs
+]
+
+[project.optional-dependencies]
+# --- Development & Quality Assurance ---
+dev = [
+    "pytest",             # Framework for unit testing
 ]
 
 [project.optional-dependencies]
