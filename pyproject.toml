@@ -11,25 +11,26 @@ requires-python = ">=3.11"
 authors = [{ name = "voice-assistant" }]
 dependencies = [
     # --- Core Utilities ---
-    "python-dotenv",      # Manages environment variables
+    "python-dotenv>=1.0.1",      # Manages environment variables
 
-    # --- Audio Processing & Playback ---
-    "pyaudio",            # Microphone input streaming
-    "sounddevice",        # High-quality audio output
-    "numpy",              # Handles audio data as arrays
+    # --- Audio Processing & VAD ---
+    "sounddevice>=0.4.6",        # High-quality audio input/output
+    "numpy>=1.26.4",              # Handles audio data as arrays
+    "webrtcvad>=2.0.10",         # WebRTC Voice Activity Detector
+    "silero-vad>=5.1.2",          # Silero Voice Activity Detector
 
     # --- AI & Machine Learning Inference ---
-    "llama-cpp-python",   # Local LLM runner (GGUF support)
+    "vosk>=0.3.45",               # Offline ASR engine (Speech-to-Text)
+    "llama-cpp-python>=0.3.0",    # Local LLM runner (GGUF support)
 
     # --- Transport & Remote Inference (gRPC) ---
-    "grpcio",             # Core gRPC framework
-    "grpcio-tools",       # Tools for generating protobuf stubs
+    "grpcio>=1.62.0",             # Core gRPC framework
+    "grpcio-tools>=1.62.0",       # Tools for generating protobuf stubs
 ]
 
 [project.optional-dependencies]
-# --- Development & Quality Assurance ---
 dev = [
-    "pytest",             # Framework for unit testing
+    "pytest>=8.0.0",              # Framework for unit testing
 ]
 
 [project.optional-dependencies]
