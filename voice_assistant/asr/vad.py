@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import audioop
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -21,10 +20,10 @@ except Exception:  # pragma: no cover - optional runtime import
 @dataclass(slots=True)
 class VADConfig:
     sample_rate: int = 16_000
-    frame_ms: int = 30
+    frame_ms: int = 32  # Recommended to keep at 32 for Silero compatibility
     aggressiveness: int = 2
     speech_frames_trigger: int = 3
-    threshold: float = 0.3  # <-- ADD THIS LINE (Lower threshold catches more speech)
+    threshold: float = 0.3  
     mode: str = "webrtc"  # webrtc | silero | energy
 
 
@@ -36,6 +35,8 @@ class VoiceActivityDetector:
         self._consecutive_silence = 0
         self._vad = None
         self._silero_iter = None
+        self._silero_speech_active = False
+        self._model = None  # Store the loaded model resource here
 
         if config.mode == "webrtc":
             if webrtcvad is None:
@@ -44,21 +45,53 @@ class VoiceActivityDetector:
         elif config.mode == "silero":
             if load_silero_vad is None or VADIterator is None:
                 raise RuntimeError("silero-vad is not installed")
-            model = load_silero_vad()
-            self._silero_iter = VADIterator(model, threshold=config.threshold, sampling_rate=config.sample_rate)
+            # Load the model once during initialization
+            self._model = load_silero_vad()
+            # Create the stateful iterator wrapper
+            self._silero_iter = VADIterator(self._model, threshold=config.threshold, sampling_rate=config.sample_rate)
+
+    def reset(self) -> None:
+        self._consecutive_speech = 0
+        self._consecutive_silence = 0
+        self._silero_speech_active = False
+        
+        # Completely re-create the iterator to guarantee a 100% fresh state
+        if self.config.mode == "silero" and self._model is not None:
+            from silero_vad import VADIterator
+            self._silero_iter = VADIterator(self._model, threshold=self.config.threshold, sampling_rate=self.config.sample_rate)
 
     def is_speech(self, pcm16: bytes) -> bool:
         if len(pcm16) != self.frame_bytes:
             return False
 
         if self.config.mode == "energy":
-            rms = audioop.rms(pcm16, 2)
-            return rms > 450
+            audio_array = np.frombuffer(pcm16, dtype=np.int16)
+            rms = np.sqrt(np.mean(np.square(audio_array, dtype=np.float32)))
+            return bool(rms > 450)
 
         if self.config.mode == "silero":
             assert self._silero_iter is not None
             audio = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32) / 32768.0
-            return self._silero_iter(audio) is not None
+            
+            import torch
+            # Convert numpy array to torch tensor
+            tensor_input = torch.from_numpy(audio)
+            
+            # 1. Get the raw probability directly from the model
+            # This bypasses the strict consecutive frame rules of VADIterator
+            with torch.no_grad():
+                speech_prob = self._model(tensor_input, self.config.sample_rate).item()
+            
+            # 2. Feed it to the iterator anyway to keep stream tracking alive
+            res = self._silero_iter(audio)
+            if res is not None:
+                if "start" in res:
+                    self._silero_speech_active = True
+                if "end" in res:
+                    self._silero_speech_active = False
+            
+            # 3. For your frame check, return True if the raw probability crosses your threshold
+            return speech_prob >= self.config.threshold
 
         assert self._vad is not None
         return bool(self._vad.is_speech(pcm16, self.config.sample_rate))
@@ -79,3 +112,7 @@ class VoiceActivityDetector:
     def reset(self) -> None:
         self._consecutive_speech = 0
         self._consecutive_silence = 0
+        self._silero_speech_active = False
+        if self._silero_iter is not None:
+            # VADIterator stores the model in self._silero_iter.model
+            self._silero_iter.model.reset_states()
