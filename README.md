@@ -47,6 +47,31 @@ Default low-latency mode target: sub-100ms perceived updates (ack tone + eager c
 5. Run:
    - `python -m voice_assistant.main --mode local`
 
+## 📂 Model Download & Setup Guide
+
+To run this voice assistant in local mode, you need to download the Large Language Model (LLM) and Text-to-Speech (TTS) files manually and configure their paths.
+
+### 1. Large Language Model (LLM)
+This pipeline uses `llama-cpp-python` for local inference, which requires models in the **GGUF** format.
+* **Recommended Model:** Llama-3-8B-Instruct or Mistral-7B-Instruct.
+* **Where to Download:** Search on Hugging Face (popular repositories include `QuantFactory` or `Bartowski`).
+* **Recommended Quantization:** Download the `Q4_K_M` or `Q5_K_M` version (e.g., `Meta-Llama-3-8B-Instruct-Q4_K_M.gguf`). This provides the best speed-to-performance ratio for low latency.
+
+### 2. Text-to-Speech (TTS) Model
+This project utilizes **Piper TTS** for sentence-chunked, non-blocking audio generation.
+* **Where to Download:** Visit the official Piper voice repository on Hugging Face or GitHub.
+* **Files Needed:** You need both the model file (`.onnx`) and its configuration file (`.json`).
+* **Recommended Voice:** `en_US-lessac-medium.onnx` and `en_US-lessac-medium.onnx.json`.
+
+### 3. Updating your `.env` File
+1. Create a new folder named `models` in the root directory of this project.
+2. Place your downloaded `.gguf`, `.onnx`, and `.json` files inside that folder.
+3. Open your `.env` file and update the paths to point to your files:
+
+```env
+LLM_MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
+TTS_MODEL_PATH="models/en_US-lessac-medium.onnx"
+
 ## gRPC mode
 
 Generate protobuf stubs once:
