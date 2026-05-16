@@ -100,7 +100,7 @@ Use meaningful commit messages.
 ## Step 4: Push Changes
 
 ```bash
-git push origin your-branch-name
+git push origin feature/your-feature-name
 ```
 
 ---
