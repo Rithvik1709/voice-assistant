@@ -106,9 +106,12 @@ class VoicePipelineOrchestrator:
 
     async def playback_task(self) -> None:
         await self.player.start()
-        while True:
-            chunk = await self.audio_queue.get()
-            await self.player.play(chunk)
+        try:
+            while True:
+                chunk = await self.audio_queue.get()
+                await self.player.play(chunk)
+        finally:
+            await self.player.stop()
 
     async def run(self) -> None:
         tasks = [
@@ -117,13 +120,20 @@ class VoicePipelineOrchestrator:
             asyncio.create_task(self.tts_task()),
             asyncio.create_task(self.playback_task()),
         ]
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for t in pending:
-            t.cancel()
-        for t in done:
-            exc = t.exception()
-            if exc:
-                raise exc
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for t in pending:
+                t.cancel()
+            for t in done:
+                exc = t.exception()
+                if exc:
+                    raise exc
+        except asyncio.CancelledError:
+            logger.info("Orchestrator shutting down gracefully...")
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     @staticmethod
     def _drain_queue(q: asyncio.Queue[str]) -> None:

@@ -97,4 +97,7 @@ async def amain() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(amain())
+    try:
+        asyncio.run(amain())
+    except KeyboardInterrupt:
+        print("\n[Voice Assistant] Shutting down...")
