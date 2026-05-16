@@ -10,7 +10,7 @@ except Exception:  # pragma: no cover - optional runtime import
     RTCPeerConnection = object  # type: ignore[assignment]
 
 
-from opentelemetry import trace
+from opentelemetry import context as otel_context, trace
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 
@@ -25,14 +25,18 @@ async def create_webrtc_session(traceparent: str | None = None) -> WebRTCSession
     if RTCPeerConnection is object:
         raise RuntimeError("aiortc is required for WebRTC mode")
         
+    token = None
     if traceparent:
         carrier = {"traceparent": traceparent}
         extracted = TraceContextTextMapPropagator().extract(carrier=carrier)
-        import opentelemetry.context as otel_context
-        otel_context.attach(extracted)
+        token = otel_context.attach(extracted)
 
-    return WebRTCSession(
-        pc=RTCPeerConnection(), 
-        incoming_audio=asyncio.Queue(), 
-        outgoing_audio=asyncio.Queue()
-    )
+    try:
+        return WebRTCSession(
+            pc=RTCPeerConnection(), 
+            incoming_audio=asyncio.Queue(), 
+            outgoing_audio=asyncio.Queue()
+        )
+    finally:
+        if token:
+            otel_context.detach(token)

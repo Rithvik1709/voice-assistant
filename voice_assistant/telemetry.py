@@ -58,10 +58,39 @@ def init_telemetry(service_name: str = "voice-assistant") -> None:
             handler.addFilter(telemetry_filter)
             
             # If there's a formatter, augment it, or create a new one
-            fmt = handler.formatter._fmt if handler.formatter else "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-            if "trace_id" not in fmt:
-                new_fmt = fmt.replace("%(message)s", "[trace_id=%(trace_id)s span_id=%(span_id)s] %(message)s")
-                handler.setFormatter(logging.Formatter(new_fmt))
+            if handler.formatter:
+                formatter = handler.formatter
+                # Accessing _fmt is discouraged but necessary for augmentation. 
+                # We use getattr to be safer and copy other attributes to preserve config.
+                fmt = getattr(formatter, "_fmt", None)
+                if fmt and "trace_id" not in fmt:
+                    # Determine style (%, {, or $) to preserve it and use correct placeholders
+                    style = "%"
+                    if hasattr(formatter, "_style"):
+                        from logging import PercentStyle, StrFormatStyle, StringTemplateStyle
+                        if isinstance(formatter._style, PercentStyle):
+                            style = "%"
+                        elif isinstance(formatter._style, StrFormatStyle):
+                            style = "{"
+                        elif isinstance(formatter._style, StringTemplateStyle):
+                            style = "$"
+                    
+                    if style == "{":
+                        new_fmt = fmt.replace("{message}", "[trace_id={trace_id} span_id={span_id}] {message}")
+                    elif style == "$":
+                        new_fmt = fmt.replace("${message}", "[trace_id=$trace_id span_id=$span_id] ${message}").replace("$message", "[trace_id=$trace_id span_id=$span_id] $message")
+                    else:
+                        new_fmt = fmt.replace("%(message)s", "[trace_id=%(trace_id)s span_id=%(span_id)s] %(message)s")
+                    
+                    handler.setFormatter(logging.Formatter(
+                        fmt=new_fmt,
+                        datefmt=formatter.datefmt,
+                        style=style
+                    ))
+            else:
+                handler.setFormatter(logging.Formatter(
+                    "%(asctime)s - %(name)s - %(levelname)s - [trace_id=%(trace_id)s span_id=%(span_id)s] %(message)s"
+                ))
 
     # Instrument gRPC
     try:
