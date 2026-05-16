@@ -84,7 +84,7 @@ class VoicePipelineOrchestrator:
 
             if token == "<eos>":
                 for sentence in sentence_chunks_from_tokens(token_buf):
-                    await self.tts.synthesize_sentence(sentence)
+                    await self._synthesize_with_retry(sentence)
                 await self.tts.flush()
                 token_buf.clear()
                 continue
@@ -97,13 +97,13 @@ class VoicePipelineOrchestrator:
             ready = sentence_chunks_from_tokens(token_buf, max_tokens=self.tts_sentence_max_tokens)
             if ready:
                 for sentence in ready[:-1]:
-                    await self.tts.synthesize_sentence(sentence)
+                    await self._synthesize_with_retry(sentence)
                 token_buf = [ready[-1]]
 
             if token_buf and self._should_flush_eager(token_buf, token):
                 eager_text = "".join(token_buf).strip()
                 if eager_text:
-                    await self.tts.synthesize_sentence(eager_text)
+                    await self._synthesize_with_retry(eager_text)
                     token_buf.clear()
 
     async def playback_task(self) -> None:
@@ -135,6 +135,16 @@ class VoicePipelineOrchestrator:
     def _drain_queue(q: asyncio.Queue[str]) -> None:
         while not q.empty():
             q.get_nowait()
+
+    async def _synthesize_with_retry(self, sentence: str, retries: int = 2) -> None:
+        for attempt in range(retries + 1):
+            accepted = await self.tts.synthesize_sentence(sentence)
+            if accepted:
+                return
+            if attempt < retries:
+                logger.warning(f"TTS backpressure, retrying sentence ({attempt + 1}/{retries}): {sentence[:50]}...")
+                await asyncio.sleep(0.5)
+        logger.error(f"Dropped sentence after {retries} retries due to TTS backpressure: {sentence[:50]}...")
 
     def _should_flush_eager(self, token_buf: list[str], latest_token: str) -> bool:
         text = "".join(token_buf).strip()

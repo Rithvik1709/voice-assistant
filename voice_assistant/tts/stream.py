@@ -9,7 +9,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 import json
-import logging
 
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue, safe_put
@@ -150,40 +149,70 @@ class PiperStreamingTTS:
             await asyncio.wait_for(self.ingest_queue.put(sentence), timeout=0.1)
             return True
         except asyncio.TimeoutError:
-            print("Dropping input due to backpressure")
+            logger.warning("Dropping input due to backpressure")
             return False
 
     async def _tts_worker(self):
-        # 1 Piper process per worker to avoid stdout/stdin interleaving
-        piper = PiperProcess(self._cmd)
-        
         while self._running:
+            # 1 Piper process per worker to avoid stdout/stdin interleaving
+            piper = PiperProcess(self._cmd)
+            
             try:
-                # Wait for sentence or timeout to flush batch
-                timeout = max(0.01, self._batcher.max_wait - (time.time() - self._batcher.last_flush))
+                while self._running:
+                    try:
+                        # Wait for sentence or timeout to flush batch
+                        timeout = max(0.01, self._batcher.max_wait - (time.time() - self._batcher.last_flush))
+                        
+                        # If we have a manual flush event, don't wait
+                        if self._flush_event.is_set():
+                            sentence = self.ingest_queue.get_nowait()
+                        else:
+                            sentence = await asyncio.wait_for(self.ingest_queue.get(), timeout=timeout)
+                        
+                        batch = self._batcher.add(sentence)
+                        if batch:
+                            await self._process_batch(batch, piper)
+                        self.ingest_queue.task_done()
+                        
+                    except asyncio.TimeoutError:
+                        # Time to flush if buffer isn't empty
+                        batch = self._batcher.flush()
+                        if batch:
+                            await self._process_batch(batch, piper)
+                    except asyncio.QueueEmpty:
+                        # Manual flush triggered but queue was empty
+                        batch = self._batcher.flush()
+                        if batch:
+                            await self._process_batch(batch, piper)
+                        self._flush_event.clear()
+                    except Exception as e:
+                        # Catch any synthesis errors (BrokenPipeError, etc.)
+                        logger.error(f"TTS worker encountered error: {e}", exc_info=True)
+                        # Attempt to flush any pending batch
+                        batch = self._batcher.flush()
+                        if batch:
+                            logger.warning(f"Dropping {len(batch)} sentences due to worker error")
+                        # Break inner loop to restart the piper process
+                        break
+            finally:
+                # Ensure Piper subprocess is always terminated before potentially restarting
+                if piper.proc and piper.proc.stdin:
+                    try:
+                        piper.proc.stdin.close()
+                    except Exception:
+                        pass
+                if piper.proc:
+                    try:
+                        piper.proc.terminate()
+                        piper.proc.wait(timeout=2)
+                    except Exception:
+                        try:
+                            piper.proc.kill()
+                        except Exception:
+                            pass
+                logger.info("Piper process cleaned up")
                 
-                # If we have a manual flush event, don't wait
-                if self._flush_event.is_set():
-                    sentence = self.ingest_queue.get_nowait()
-                else:
-                    sentence = await asyncio.wait_for(self.ingest_queue.get(), timeout=timeout)
-                
-                batch = self._batcher.add(sentence)
-                if batch:
-                    await self._process_batch(batch, piper)
-                self.ingest_queue.task_done()
-                
-            except asyncio.TimeoutError:
-                # Time to flush if buffer isn't empty
-                batch = self._batcher.flush()
-                if batch:
-                    await self._process_batch(batch, piper)
-            except asyncio.QueueEmpty:
-                # Manual flush triggered but queue was empty
-                batch = self._batcher.flush()
-                if batch:
-                    await self._process_batch(batch, piper)
-                self._flush_event.clear()
+        logger.info("TTS worker stopped completely")
 
     def _split_audio_chunks(self, audio_bytes: bytes, chunk_size: int = 32768):
         for i in range(0, len(audio_bytes), chunk_size):
@@ -224,8 +253,11 @@ class PiperStreamingTTS:
             await safe_put(self.playback_queue, AudioChunk(pcm16=chunk, sample_rate=self.config.sample_rate))
 
     async def flush(self) -> None:
+        """Wait until all queued sentences have been processed."""
         # Signal workers to flush immediately
         self._flush_event.set()
-        # Give worker a moment to process the flush
-        await asyncio.sleep(0.05)
+        # Wait for all items currently in queue to be marked as done
+        await self.ingest_queue.join()
+        # Clear the flush event for next time
+        self._flush_event.clear()
 
