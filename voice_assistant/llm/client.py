@@ -7,8 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from voice_assistant.benchmark import BenchmarkTracker
+from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 @dataclass(slots=True)
@@ -42,30 +44,35 @@ class StreamingLLMClient:
         if self.bench:
             self.bench.mark("prompt_sent_ts")
 
-        first_token_seen = False
-        assembled: list[str] = []
-
-        stream = self._llama.create_completion(
-            prompt=prompt,
-            max_tokens=self.config.max_tokens,
-            temperature=self.config.temperature,
-            stream=True,
-        )
-
-        start = time.perf_counter()
-        for packet in stream:
-            token = packet["choices"][0]["text"]
-            if not token:
-                continue
-            if not first_token_seen:
-                first_token_seen = True
-                if self.bench:
-                    self.bench.mark("first_token_ts")
-                logger.info("TTFT_ms=%.2f", (time.perf_counter() - start) * 1000.0)
-            assembled.append(token)
-            await out_queue.put(token)
-
-        return "".join(assembled)
+        with tracer.start_as_current_span("llm.stream_tokens") as span:
+            first_token_seen = False
+            assembled: list[str] = []
+    
+            stream = self._llama.create_completion(
+                prompt=prompt,
+                max_tokens=self.config.max_tokens,
+                temperature=self.config.temperature,
+                stream=True,
+            )
+    
+            start = time.perf_counter()
+            for packet in stream:
+                token = packet["choices"][0]["text"]
+                if not token:
+                    continue
+                if not first_token_seen:
+                    first_token_seen = True
+                    if self.bench:
+                        self.bench.mark("first_token_ts")
+                    ttft = (time.perf_counter() - start) * 1000.0
+                    logger.info("TTFT_ms=%.2f", ttft)
+                    span.set_attribute("llm.ttft_ms", ttft)
+                assembled.append(token)
+                await out_queue.put(token)
+    
+            final_text = "".join(assembled)
+            span.set_attribute("llm.completion_tokens", len(assembled))
+            return final_text
 
     def tokenize(self, text: str) -> list[int]:
         return self._llama.tokenize(text.encode("utf-8"), add_bos=False)
