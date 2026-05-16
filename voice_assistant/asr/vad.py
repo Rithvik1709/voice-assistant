@@ -29,7 +29,7 @@ class VADConfig:
     frame_ms: int = 30  # Default kept at 30ms for WebRTC compatibility
     aggressiveness: int = 2
     speech_frames_trigger: int = 3
-    threshold: float = 0.3  # Safe production default
+    threshold: float = 0.015  # Safe production default
     mode: str = "webrtc"  # webrtc | silero | energy
 
 
