@@ -8,6 +8,7 @@ import numpy as np
 from voice_assistant.asr.stream import ASREvent, StreamingASR
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.llm.client import StreamingLLMClient
+from typing import Optional, Any
 from voice_assistant.tts.player import AudioPlayer
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue
 from voice_assistant.tts.stream import PiperStreamingTTS, sentence_chunks_from_tokens
@@ -26,6 +27,7 @@ class VoicePipelineOrchestrator:
         tts: PiperStreamingTTS,
         player: AudioPlayer,
         bench: BenchmarkTracker,
+        nlu: Optional[Any] = None,
         tts_backpressure_threshold: int = 3,
         tts_sentence_max_tokens: int = 8,
         tts_eager_min_words: int = 3,
@@ -46,6 +48,7 @@ class VoicePipelineOrchestrator:
         self.token_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
         self.audio_queue: AudioChunkQueue = tts.queue
         self.interrupt_event = asyncio.Event()
+        self.nlu = nlu
 
     async def asr_task(self) -> None:
         async for event in self.asr.stream_events():
@@ -64,6 +67,15 @@ class VoicePipelineOrchestrator:
             prompt = await self.prompt_queue.get()
             with tracer.start_as_current_span("orchestrator.process_prompt") as span:
                 span.set_attribute("prompt.length", len(prompt))
+                # run lightweight NLU (if provided) to tag the prompt with intent
+                try:
+                    if self.nlu is not None:
+                        intent = self.nlu.classify(prompt)
+                        if isinstance(intent, dict):
+                            span.set_attribute("nlu.intent", intent.get("intent", ""))
+                            span.set_attribute("nlu.confidence", float(intent.get("confidence", 0.0)))
+                except Exception:
+                    logger.exception("nlu classification failed")
                 if self.interrupt_event.is_set():
                     self._drain_queue(self.token_queue)
                     self.interrupt_event.clear()

@@ -13,6 +13,7 @@ from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
 from voice_assistant.tts.player import AudioPlayer
 from voice_assistant.tts.queue import AudioChunkQueue
 from voice_assistant.tts.stream import PiperConfig, PiperStreamingTTS
+from voice_assistant.nlu import SimpleIntentClassifier
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,6 +65,7 @@ async def run_local(settings: Settings) -> None:
         llm=llm,
         tts=tts,
         player=player,
+        nlu=SimpleIntentClassifier(),
         bench=bench,
         tts_sentence_max_tokens=settings.sentence_max_tokens,
         tts_eager_min_words=settings.tts_eager_min_words,

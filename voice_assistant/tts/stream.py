@@ -11,7 +11,7 @@ from pathlib import Path
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue
 
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_SENTENCE_SPLIT = re.compile(r"([.!?]+(?:\s+|$))")
 _logger = logging.getLogger(__name__)
 _PIPER_TIMEOUT_S = 30.0
 
@@ -21,23 +21,38 @@ def sentence_chunks_from_tokens(tokens: list[str], max_tokens: int = 28) -> list
     if not text:
         return []
 
-    pieces = _SENTENCE_SPLIT.split(text)
+    # split with captures so we keep the delimiters
+    parts = _SENTENCE_SPLIT.split(text)
+    
+    chunks = []
+    for i in range(0, len(parts) - 1, 2):
+        sentence = parts[i] + parts[i+1]
+        if sentence.strip():
+            chunks.append(sentence.strip())
+    
+    if len(parts) % 2 == 1 and parts[-1].strip():
+        chunks.append(parts[-1].strip())
+
+    if not chunks:
+        return [text]
+
     out: list[str] = []
-    buf: list[str] = []
-    count = 0
-    for piece in pieces:
-        words = piece.strip().split()
+    # If we want to split into sentences EVEN IF they fit in max_tokens, 
+    # we need to change the logic. The current logic joins them if they fit.
+    # The test expectation is ["Hello there.", "How are you?", "I am fine!"]
+    # which means it wants EXACTLY one sentence per chunk if possible.
+    
+    for chunk in chunks:
+        words = chunk.split()
         if not words:
             continue
-        if count + len(words) > max_tokens and buf:
-            out.append(" ".join(buf).strip())
-            buf = [piece.strip()]
-            count = len(words)
+            
+        if len(words) > max_tokens:
+            for i in range(0, len(words), max_tokens):
+                out.append(" ".join(words[i:i + max_tokens]))
         else:
-            buf.append(piece.strip())
-            count += len(words)
-    if buf:
-        out.append(" ".join(buf).strip())
+            out.append(chunk)
+
     return out
 
 
