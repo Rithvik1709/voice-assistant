@@ -33,6 +33,7 @@ Default low-latency mode target: sub-100ms perceived updates (ack tone + eager c
 - Barge-in interrupt handling (speech during playback cancels output)
 - gRPC bidirectional streaming mode for remote inference
 - Benchmark metrics: ASR latency, TTFT, TTS first chunk, end-to-end, RTF
+- Optional offline wake-word detection via openWakeWord (`--wakeword` flag)
 
 ## Quickstart (local)
 
@@ -71,6 +72,7 @@ This project utilizes **Piper TTS** for sentence-chunked, non-blocking audio gen
 ```env
 MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
 PIPER_VOICE="models/en_US-lessac-medium.onnx"
+```
 
 ## gRPC mode
 
@@ -85,6 +87,42 @@ Server:
 Client:
 
 - `python -m voice_assistant.main --mode client --target localhost:50051`
+
+## Wake Word Support
+
+The assistant supports fully **offline** wake word detection powered by [openWakeWord](https://github.com/dscripka/openWakeWord). When enabled, the pipeline waits silently until the chosen wake word is spoken before starting the speech-to-text workflow.
+
+### Install dependencies
+
+```bash
+pip install -e .
+```
+
+`openwakeword`, `sounddevice`, and `numpy` are included in the standard dependency list and will be installed automatically.
+
+### Run with wake word detection
+
+```bash
+python -m voice_assistant --wakeword alexa
+```
+
+Replace `alexa` with any model name supported by openWakeWord (e.g. `hey_mycroft`, `hey_jarvis`). The model is downloaded automatically by openWakeWord on first use.
+
+### Run without wake word detection
+
+Simply omit the `--wakeword` flag — the assistant behaves exactly as before:
+
+```bash
+python -m voice_assistant.main --mode local
+```
+
+### How it works
+
+| Invocation | Behaviour |
+|---|---|
+| `--wakeword alexa` | Listens for "Alexa" before starting the pipeline |
+| `--wakeword <model>` | Listens for the specified openWakeWord model |
+| *(flag omitted)* | No wake word gate; pipeline starts immediately |
 
 ## Tests
 

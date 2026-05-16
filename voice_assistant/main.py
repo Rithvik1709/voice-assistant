@@ -21,6 +21,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=50051)
     p.add_argument("--target", default="localhost:50051")
+    # Optional wake-word gate. Provide a model name (e.g. "alexa") to enable;
+    # omit the flag entirely to run without wake-word detection.
+    p.add_argument(
+        "--wakeword",
+        metavar="MODEL",
+        nargs="?",
+        const="alexa",
+        default=None,
+        help="Enable wake-word detection before starting the pipeline. "
+             "Optionally specify a model name (default: alexa).",
+    )
     return p.parse_args()
 
 
@@ -78,6 +89,16 @@ async def amain() -> None:
 
     if args.mode in {"local", "server"}:
         settings.validate()
+
+    # --- Wake-word gate -------------------------------------------------------
+    # Only applies in modes that use the local microphone (local / server).
+    # Skipped entirely when --wakeword is not supplied.
+    if args.wakeword is not None and args.mode in {"local", "server"}:
+        from voice_assistant.wakeword import WakeWordDetector
+
+        detector = WakeWordDetector(model_name=args.wakeword)
+        detector.listen()  # blocks until the wake word is detected
+    # ---------------------------------------------------------------------------
 
     if args.mode == "local":
         await run_local(settings)

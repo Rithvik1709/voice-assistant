@@ -13,6 +13,7 @@ dependencies = [
   "python-dotenv>=1.0.1",
   "numpy>=1.26.4",
   "sounddevice>=0.4.6",
+  "openwakeword>=0.6.0",
   "webrtcvad>=2.0.10",
   "silero-vad>=5.1.2",
   "vosk>=0.3.45",
