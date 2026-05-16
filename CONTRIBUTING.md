@@ -61,7 +61,7 @@ The README includes:
 * gRPC setup
 * Testing instructions
 
-[README.md](https://github.com/rithvik1709/voice-assistant/blob/main/README.md)
+[README.md](./README.md)
 
 ---
 
