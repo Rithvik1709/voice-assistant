@@ -10,25 +10,16 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "voice-assistant" }]
 dependencies = [
-    # --- Core Utilities ---
-    "python-dotenv>=1.0.1",      # Manages environment variables
-
-    # --- Audio Processing & Playback ---
-    "sounddevice>=0.4.6",        # High-quality audio input/output
-    "numpy>=1.26.4",              # Handles audio data as arrays
-    "webrtcvad>=2.0.10",         # WebRTC Voice Activity Detector
-    "silero-vad>=5.1.2",          # Silero Voice Activity Detector
-
-    # --- AI & Machine Learning Inference ---
-    "vosk>=0.3.45",               # Offline ASR engine
-    "llama-cpp-python>=0.3.0",    # Local LLM runner (GGUF support)
-
-    # --- Transport & Remote Inference ---
-    "grpcio>=1.62.0",             # Core gRPC framework
-    "grpcio-tools>=1.62.0",       # Tools for generating protobuf stubs
-    "aiortc>=1.7.0",              # WebRTC support
-
-    # --- Observability (OpenTelemetry) ---
+    "python-dotenv>=1.0.1",
+    "sounddevice>=0.4.6",
+    "numpy>=1.26.4",
+    "webrtcvad>=2.0.10",
+    "silero-vad>=5.1.2",
+    "vosk>=0.3.45",
+    "llama-cpp-python>=0.3.0",
+    "grpcio>=1.62.0",
+    "grpcio-tools>=1.62.0",
+    "aiortc>=1.7.0",
     "opentelemetry-api",
     "opentelemetry-sdk",
     "opentelemetry-exporter-otlp",
@@ -37,7 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",              # Framework for unit testing
+    "pytest>=8.0.0",
 ]
 cuda = ["llama-cpp-python[cuda]>=0.3.0"]
 metal = ["llama-cpp-python[metal]>=0.3.0"]
