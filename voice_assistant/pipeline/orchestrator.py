@@ -18,6 +18,8 @@ from opentelemetry import trace
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
+TTS_RETRY_DELAY_S = 0.5
+
 
 class VoicePipelineOrchestrator:
     def __init__(
@@ -171,7 +173,7 @@ class VoicePipelineOrchestrator:
                 return
             if attempt < retries:
                 logger.warning(f"TTS backpressure, retrying sentence ({attempt + 1}/{retries}): {sentence[:50]}...")
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(TTS_RETRY_DELAY_S)
         logger.error(f"Dropped sentence after {retries} retries due to TTS backpressure: {sentence[:50]}...")
 
     def _should_flush_eager(self, token_buf: list[str], latest_token: str) -> bool:

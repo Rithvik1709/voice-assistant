@@ -16,7 +16,6 @@ from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue, safe_put
 logger = logging.getLogger(__name__)
 
 _SENTENCE_SPLIT = re.compile(r"([.!?]+(?:\s+|$))")
-_logger = logging.getLogger(__name__)
 _PIPER_TIMEOUT_S = 30.0
 
 
@@ -87,6 +86,8 @@ class PiperProcess:
         # Read WAV header to determine chunk size (44 bytes)
         # Note: Assumes standard PCM WAV output; parsing validated against current Piper behavior.
         # If Piper changes header format (e.g., adds extra chunks), this could break.
+        if self.proc.poll() is not None:
+            raise RuntimeError("Piper process exited unexpectedly")
         header = self.proc.stdout.read(44)
         if len(header) < 44:
             return b""
@@ -95,6 +96,8 @@ class PiperProcess:
         data_size = struct.unpack('<I', header[40:44])[0]
         
         # Read the exact amount of PCM data
+        if self.proc.poll() is not None:
+            raise RuntimeError("Piper process exited unexpectedly")
         pcm = self.proc.stdout.read(data_size)
         return pcm
 
@@ -103,7 +106,7 @@ class SentenceBatcher:
         self.buffer: list[str] = []
         self.max_batch_size = max_batch_size
         self.max_wait = max_wait_ms / 1000.0
-        self.last_flush = time.time()
+        self.last_flush = time.monotonic()
 
     def add(self, sentence: str) -> list[str] | None:
         self.buffer.append(sentence)
@@ -119,7 +122,7 @@ class SentenceBatcher:
 
         batch = self.buffer
         self.buffer = []
-        self.last_flush = time.time()
+        self.last_flush = time.monotonic()
         return batch
 
 class PiperStreamingTTS:
@@ -178,7 +181,7 @@ class PiperStreamingTTS:
                 while self._running:
                     try:
                         # Wait for sentence or timeout to flush batch
-                        timeout = max(0.01, self._batcher.max_wait - (time.time() - self._batcher.last_flush))
+                        timeout = max(0.01, self._batcher.max_wait - (time.monotonic() - self._batcher.last_flush))
                         
                         # If we have a manual flush event, don't wait
                         if self._flush_event.is_set():
@@ -186,10 +189,12 @@ class PiperStreamingTTS:
                         else:
                             sentence = await asyncio.wait_for(self.ingest_queue.get(), timeout=timeout)
                         
-                        batch = self._batcher.add(sentence)
-                        if batch:
-                            await self._process_batch(batch, piper)
-                        self.ingest_queue.task_done()
+                        try:
+                            batch = self._batcher.add(sentence)
+                            if batch:
+                                await self._process_batch(batch, piper)
+                        finally:
+                            self.ingest_queue.task_done()
                         
                     except asyncio.TimeoutError:
                         # Time to flush if buffer isn't empty
