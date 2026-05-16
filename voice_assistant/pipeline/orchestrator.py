@@ -9,7 +9,7 @@ from voice_assistant.asr.stream import ASREvent, StreamingASR
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.llm.client import StreamingLLMClient
 from voice_assistant.tts.player import AudioPlayer
-from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue
+from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue, safe_put
 from voice_assistant.tts.stream import PiperStreamingTTS, sentence_chunks_from_tokens
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class VoicePipelineOrchestrator:
         self.partial_queue: asyncio.Queue[ASREvent] = asyncio.Queue(maxsize=64)
         self.prompt_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
         self.token_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
-        self.audio_queue: AudioChunkQueue = tts.queue
+        self.audio_queue: AudioChunkQueue = tts.playback_queue
         self.interrupt_event = asyncio.Event()
 
     async def asr_task(self) -> None:
@@ -78,20 +78,22 @@ class VoicePipelineOrchestrator:
                 token_buf.clear()
                 self.audio_queue.clear()
                 self.player.interrupt()
+                await self.tts.flush()
                 self.interrupt_event.clear()
                 continue
 
             if token == "<eos>":
                 for sentence in sentence_chunks_from_tokens(token_buf):
                     await self.tts.synthesize_sentence(sentence)
+                await self.tts.flush()
                 token_buf.clear()
                 continue
 
             token_buf.append(token)
-            if self.audio_queue.qsize() > self.tts_backpressure_threshold:
-                await asyncio.sleep(0.005)
-                continue
-
+            # Natural backpressure: if the audio queue is full, this task will 
+            # naturally slow down because synthesize_sentence (which puts to the queue) 
+            # is awaited. We don't need a manual sleep here that just wastes cycles.
+            
             ready = sentence_chunks_from_tokens(token_buf, max_tokens=self.tts_sentence_max_tokens)
             if ready:
                 for sentence in ready[:-1]:
@@ -111,19 +113,23 @@ class VoicePipelineOrchestrator:
             await self.player.play(chunk)
 
     async def run(self) -> None:
-        tasks = [
-            asyncio.create_task(self.asr_task()),
-            asyncio.create_task(self.llm_task()),
-            asyncio.create_task(self.tts_task()),
-            asyncio.create_task(self.playback_task()),
-        ]
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for t in pending:
-            t.cancel()
-        for t in done:
-            exc = t.exception()
-            if exc:
-                raise exc
+        await self.tts.start()
+        try:
+            tasks = [
+                asyncio.create_task(self.asr_task()),
+                asyncio.create_task(self.llm_task()),
+                asyncio.create_task(self.tts_task()),
+                asyncio.create_task(self.playback_task()),
+            ]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for t in pending:
+                t.cancel()
+            for t in done:
+                exc = t.exception()
+                if exc:
+                    raise exc
+        finally:
+            await self.tts.stop()
 
     @staticmethod
     def _drain_queue(q: asyncio.Queue[str]) -> None:
@@ -149,4 +155,4 @@ class VoicePipelineOrchestrator:
         pcm16 = np.clip(tone * 32767.0, -32768.0, 32767.0).astype(np.int16).tobytes()
         if self.bench.current.first_audio_ts is None:
             self.bench.mark("first_audio_ts")
-        await self.audio_queue.put(AudioChunk(pcm16=pcm16, sample_rate=sr))
+        await safe_put(self.audio_queue, AudioChunk(pcm16=pcm16, sample_rate=sr))
