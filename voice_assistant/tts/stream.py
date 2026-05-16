@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import subprocess
 import time
@@ -11,6 +12,8 @@ from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_logger = logging.getLogger(__name__)
+_PIPER_TIMEOUT_S = 30.0
 
 
 def sentence_chunks_from_tokens(tokens: list[str], max_tokens: int = 28) -> list[str]:
@@ -68,15 +71,27 @@ class PiperStreamingTTS:
             self.bench.add_synthesized_audio(dur_sec)
             self.bench.current.tts_end_ts = time.perf_counter()
 
-        await self.queue.put(AudioChunk(pcm16=pcm, sample_rate=self.config.sample_rate))
+        if pcm:
+            await self.queue.put(AudioChunk(pcm16=pcm, sample_rate=self.config.sample_rate))
         _ = time.perf_counter() - start
 
     def _run_piper(self, sentence: str) -> bytes:
-        cmd = [
-            "piper",
-            "--model",
-            str(self.config.voice_path),
-            "--output_raw",
-        ]
-        proc = subprocess.run(cmd, input=sentence.encode("utf-8"), capture_output=True, check=True)
-        return proc.stdout
+        cmd = ["piper", "--model", str(self.config.voice_path), "--output_raw"]
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=sentence.encode("utf-8"),
+                capture_output=True,
+                check=True,
+                timeout=_PIPER_TIMEOUT_S,
+            )
+            return proc.stdout
+        except subprocess.TimeoutExpired:
+            _logger.warning("Piper timed out after %.1fs for sentence: %r", _PIPER_TIMEOUT_S, sentence[:60])
+            return b""
+        except subprocess.CalledProcessError as exc:
+            _logger.error("Piper failed (exit %d): %s", exc.returncode, exc.stderr.decode(errors="replace") if exc.stderr else "")
+            return b""
+        except OSError as exc:
+            _logger.error("Piper executable error: %s", exc)
+            return b""
