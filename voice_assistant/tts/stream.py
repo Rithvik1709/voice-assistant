@@ -92,3 +92,6 @@ class PiperStreamingTTS:
         except subprocess.CalledProcessError as exc:
             _logger.error("Piper failed (exit %d): %s", exc.returncode, exc.stderr.decode(errors="replace") if exc.stderr else "")
             return b""
+        except OSError as exc:
+            _logger.error("Piper executable error: %s", exc)
+            return b""
