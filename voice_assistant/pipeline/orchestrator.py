@@ -47,8 +47,7 @@ class VoicePipelineOrchestrator:
         self.prompt_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
         self.token_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
         self.audio_queue: AudioChunkQueue = tts.queue
-        self.llm_interrupt = asyncio.Event()
-        self.tts_interrupt = asyncio.Event()
+        self.interrupt_event = asyncio.Event()
         self.nlu = nlu
 
     async def asr_task(self) -> None:
@@ -61,6 +60,7 @@ class VoicePipelineOrchestrator:
 
             if event.type == "final" and event.text.strip():
                 self.bench.mark("final_text_ts")
+                self.interrupt_event.clear()
                 await self.prompt_queue.put(event.text)
 
     async def llm_task(self) -> None:
@@ -77,9 +77,8 @@ class VoicePipelineOrchestrator:
                             span.set_attribute("nlu.confidence", float(intent.get("confidence", 0.0)))
                 except Exception:
                     logger.exception("nlu classification failed")
-                if self.llm_interrupt.is_set():
+                if self.interrupt_event.is_set():
                     self._drain_queue(self.token_queue)
-                    self.llm_interrupt.clear()
                 self.bench.mark("prompt_sent_ts")
                 if self.audio_queue.empty():
                     await self._enqueue_ack_tone()
@@ -91,12 +90,11 @@ class VoicePipelineOrchestrator:
         while True:
             token = await self.token_queue.get()
 
-            if self.tts_interrupt.is_set():
+            if self.interrupt_event.is_set():
                 self._drain_queue(self.token_queue)
                 token_buf.clear()
                 self.audio_queue.clear()
                 self.player.interrupt()
-                self.tts_interrupt.clear()
                 continue
 
             if token == "<eos>":
