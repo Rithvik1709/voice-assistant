@@ -103,23 +103,14 @@ class SimpleIntentClassifier:
 
         for intent, keys in self.INTENT_KEYWORDS.items():
             for kw in keys:
-                if kw in lowered:
+                if f" {kw} " in f" {lowered} ":
                     scores[intent] += 1
 
         best_intent = max(scores, key=lambda k: scores[k])
         best_score = scores[best_intent]
 
         if best_score == 0:
-            greeting_words = [
-                "namaste",
-                "namaskar",
-                "hello",
-                "hi",
-            ]
-
-            if devanagari and any(
-                word in lowered for word in greeting_words
-            ):
+            if devanagari:
                 return _IntentResult(
                     "greeting",
                     0.5,
@@ -129,7 +120,7 @@ class SimpleIntentClassifier:
             return _IntentResult(
                 "unknown",
                 0.2,
-                {"lang": "hi" if devanagari else "und"},
+                {"lang": "und"},
             ).to_dict()
 
         # confidence scales with count; clamp to [0.2, 0.95]
