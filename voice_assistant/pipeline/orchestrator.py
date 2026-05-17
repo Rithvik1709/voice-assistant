@@ -8,11 +8,15 @@ import numpy as np
 from voice_assistant.asr.stream import ASREvent, StreamingASR
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.llm.client import StreamingLLMClient
+from typing import Optional, Any
 from voice_assistant.tts.player import AudioPlayer
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue
 from voice_assistant.tts.stream import PiperStreamingTTS, sentence_chunks_from_tokens
 
+from opentelemetry import trace
+
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class VoicePipelineOrchestrator:
@@ -23,6 +27,7 @@ class VoicePipelineOrchestrator:
         tts: PiperStreamingTTS,
         player: AudioPlayer,
         bench: BenchmarkTracker,
+        nlu: Optional[Any] = None,
         tts_backpressure_threshold: int = 3,
         tts_sentence_max_tokens: int = 8,
         tts_eager_min_words: int = 3,
@@ -43,6 +48,7 @@ class VoicePipelineOrchestrator:
         self.token_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
         self.audio_queue: AudioChunkQueue = tts.queue
         self.interrupt_event = asyncio.Event()
+        self.nlu = nlu
 
     async def asr_task(self) -> None:
         async for event in self.asr.stream_events():
@@ -59,14 +65,25 @@ class VoicePipelineOrchestrator:
     async def llm_task(self) -> None:
         while True:
             prompt = await self.prompt_queue.get()
-            if self.interrupt_event.is_set():
-                self._drain_queue(self.token_queue)
-                self.interrupt_event.clear()
-            self.bench.mark("prompt_sent_ts")
-            if self.audio_queue.empty():
-                await self._enqueue_ack_tone()
-            await self.llm.stream_tokens(prompt, self.token_queue)
-            await self.token_queue.put("<eos>")
+            with tracer.start_as_current_span("orchestrator.process_prompt") as span:
+                span.set_attribute("prompt.length", len(prompt))
+                # run lightweight NLU (if provided) to tag the prompt with intent
+                try:
+                    if self.nlu is not None:
+                        intent = self.nlu.classify(prompt)
+                        if isinstance(intent, dict):
+                            span.set_attribute("nlu.intent", intent.get("intent", ""))
+                            span.set_attribute("nlu.confidence", float(intent.get("confidence", 0.0)))
+                except Exception:
+                    logger.exception("nlu classification failed")
+                if self.interrupt_event.is_set():
+                    self._drain_queue(self.token_queue)
+                    self.interrupt_event.clear()
+                self.bench.mark("prompt_sent_ts")
+                if self.audio_queue.empty():
+                    await self._enqueue_ack_tone()
+                await self.llm.stream_tokens(prompt, self.token_queue)
+                await self.token_queue.put("<eos>")
 
     async def tts_task(self) -> None:
         token_buf: list[str] = []
@@ -106,9 +123,12 @@ class VoicePipelineOrchestrator:
 
     async def playback_task(self) -> None:
         await self.player.start()
-        while True:
-            chunk = await self.audio_queue.get()
-            await self.player.play(chunk)
+        try:
+            while True:
+                chunk = await self.audio_queue.get()
+                await self.player.play(chunk)
+        finally:
+            await self.player.stop()
 
     async def run(self) -> None:
         tasks = [
@@ -117,13 +137,19 @@ class VoicePipelineOrchestrator:
             asyncio.create_task(self.tts_task()),
             asyncio.create_task(self.playback_task()),
         ]
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for t in pending:
-            t.cancel()
-        for t in done:
-            exc = t.exception()
-            if exc:
-                raise exc
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for t in done:
+                exc = t.exception()
+                if exc:
+                    raise exc
+        except asyncio.CancelledError:
+            logger.info("Orchestrator shutting down gracefully...")
+            raise
+        finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     @staticmethod
     def _drain_queue(q: asyncio.Queue[str]) -> None:
