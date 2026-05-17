@@ -26,7 +26,7 @@ coverage.xml
 # Virtual environments
 .venv/
 venv/
-env/
+.env
 ENV/
 
 # PyCharm
