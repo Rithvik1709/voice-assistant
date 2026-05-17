@@ -22,9 +22,26 @@ dependencies = [
   "grpcio-tools>=1.62.0",
   "aiortc>=1.7.0",
   "pytest>=8.0.0"
+    "python-dotenv>=1.0.1",
+    "sounddevice>=0.4.6",
+    "numpy>=1.26.4",
+    "webrtcvad>=2.0.10",
+    "silero-vad>=5.1.2",
+    "vosk>=0.3.45",
+    "llama-cpp-python>=0.3.0",
+    "grpcio>=1.62.0",
+    "grpcio-tools>=1.62.0",
+    "aiortc>=1.7.0",
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp",
+    "opentelemetry-instrumentation-grpc",
 ]
 
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
 cuda = ["llama-cpp-python[cuda]>=0.3.0"]
 metal = ["llama-cpp-python[metal]>=0.3.0"]
 
