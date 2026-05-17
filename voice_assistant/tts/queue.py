@@ -27,5 +27,8 @@ class AudioChunkQueue:
         return self._q.empty()
 
     def clear(self) -> None:
-        while not self._q.empty():
-            self._q.get_nowait()
+        while True:
+            try:
+                self._q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
