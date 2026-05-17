@@ -20,7 +20,9 @@ dependencies = [
   "grpcio>=1.62.0",
   "grpcio-tools>=1.62.0",
   "aiortc>=1.7.0",
-  "pytest>=8.0.0"
+  "pytest>=8.0.0",
+  "huggingface_hub>=0.22.0",
+  "tqdm>=4.66.0"
 ]
 
 [project.optional-dependencies]

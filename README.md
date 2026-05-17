@@ -41,36 +41,32 @@ Default low-latency mode target: sub-100ms perceived updates (ack tone + eager c
    - CPU: `pip install -e .`
    - CUDA: `pip install -e .[cuda]`
    - Apple Metal: `pip install -e .[metal]`
-3. Copy env:
-   - `cp .env.example .env`
-4. Fill model paths in `.env`.
-5. Run:
+3. Run the automated model downloader:
+   - `python setup_models.py`
+4. Run the voice assistant:
    - `python -m voice_assistant.main --mode local`
 
 ## 📂 Model Download & Setup Guide
 
-To run this voice assistant in local mode, you need to download the Large Language Model (LLM) and Text-to-Speech (TTS) files manually and configure their paths.
+For the easiest setup, simply run the automated CLI tool:
+```bash
+python setup_models.py
+```
+This will prompt you to choose an LLM (either a fast 398MB Qwen model for testing, or a high-quality Llama-3-8B model), automatically download the Piper TTS voices and the Vosk ASR model, and generate your `.env` file for you.
 
-### 1. Large Language Model (LLM)
-This pipeline uses `llama-cpp-python` for local inference, which requires models in the **GGUF** format.
-* **Recommended Model:** Llama-3-8B-Instruct or Mistral-7B-Instruct.
-* **Where to Download:** Search on Hugging Face (popular repositories include `QuantFactory` or `Bartowski`).
-* **Recommended Quantization:** Download the `Q4_K_M` or `Q5_K_M` version (e.g., `Meta-Llama-3-8B-Instruct-Q4_K_M.gguf`). This provides the best speed-to-performance ratio for low latency.
+### Manual Configuration (Optional)
 
-### 2. Text-to-Speech (TTS) Model
-This project utilizes **Piper TTS** for sentence-chunked, non-blocking audio generation.
-* **Where to Download:** Visit the official Piper voice repository on Hugging Face or GitHub.
-* **Files Needed:** You need both the model file (`.onnx`) and its configuration file (`.json`).
-* **Recommended Voice:** `en_US-lessac-medium.onnx` and `en_US-lessac-medium.onnx.json`.
+If you prefer to configure your models manually:
 
-### 3. Updating your `.env` File
-1. Create a new folder named `models` in the root directory of this project.
-2. Place your downloaded `.gguf`, `.onnx`, and `.json` files inside that folder.
-3. Open your `.env` file and update the paths to point to your files:
+1. Create a folder named `models` in the root directory.
+2. Place your downloaded `.gguf`, `.onnx` (with `.onnx.json`), and extracted Vosk ASR folder inside `models/`.
+3. Create/update your `.env` file:
 
 ```env
-MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
+MODEL_PATH="models/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
 PIPER_VOICE="models/en_US-lessac-medium.onnx"
+ASR_MODEL_PATH="models/vosk-model-small-en-us-0.15"
+```
 
 ## gRPC mode
 

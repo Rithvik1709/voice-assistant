@@ -18,23 +18,21 @@ def sentence_chunks_from_tokens(tokens: list[str], max_tokens: int = 28) -> list
     if not text:
         return []
 
-    pieces = _SENTENCE_SPLIT.split(text)
+    words = text.split()
     out: list[str] = []
     buf: list[str] = []
-    count = 0
-    for piece in pieces:
-        words = piece.strip().split()
-        if not words:
-            continue
-        if count + len(words) > max_tokens and buf:
-            out.append(" ".join(buf).strip())
-            buf = [piece.strip()]
-            count = len(words)
-        else:
-            buf.append(piece.strip())
-            count += len(words)
+    
+    for word in words:
+        buf.append(word)
+        # Check if the word ends with sentence-ending punctuation
+        is_complete = word[-1] in {".", "!", "?"}
+        
+        if len(buf) >= max_tokens or is_complete:
+            out.append(" ".join(buf))
+            buf = []
+            
     if buf:
-        out.append(" ".join(buf).strip())
+        out.append(" ".join(buf))
     return out
 
 
