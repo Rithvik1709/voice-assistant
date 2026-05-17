@@ -56,6 +56,11 @@ def read_wav_pcm(audio_path: str) -> bytes:
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
     with wave.open(str(path), "rb") as wf:
+        if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getframerate() != SAMPLE_RATE:
+            raise RuntimeError(
+                f"Invalid WAV format in {audio_path}. "
+                f"Expected mono, 16-bit, {SAMPLE_RATE}Hz."
+            )
         n_frames = wf.getnframes()
         pcm = wf.readframes(n_frames)
     return pcm
@@ -63,18 +68,35 @@ def read_wav_pcm(audio_path: str) -> bytes:
 
 # ── STT backends ─────────────────────────────────────────────────────────────
 
-def transcribe_with_vosk(audio_path: str, model_path: str) -> str:
-    """
-    Transcribe audio file using the Vosk backend (same as _VoskRecognizer in stream.py).
-    Requires: pip install vosk
-    """
+
+
+
+def load_vosk_model(model_path: str):
+    """Load Vosk model once and return it."""
     try:
-        from vosk import KaldiRecognizer, Model
+        from vosk import Model
     except ImportError:
         raise RuntimeError("vosk not installed. Run: pip install vosk")
+    return Model(model_path)
+
+
+def load_whispercpp_model(model_path: str):
+    """Load WhisperCpp model once and return it."""
+    try:
+        from whisper_cpp_python import Whisper
+    except ImportError:
+        raise RuntimeError(
+            "whisper_cpp_python not installed. "
+            "Run: pip install whisper-cpp-python"
+        )
+    return Whisper(model_path)
+
+
+def transcribe_with_vosk(audio_path: str, model) -> str:
+    """Transcribe audio using a pre-loaded Vosk model."""
+    from vosk import KaldiRecognizer
 
     pcm = read_wav_pcm(audio_path)
-    model = Model(model_path)
     rec = KaldiRecognizer(model, SAMPLE_RATE)
 
     chunk_size = 4000
@@ -85,25 +107,13 @@ def transcribe_with_vosk(audio_path: str, model_path: str) -> str:
     return result.get("text", "").strip().lower()
 
 
-def transcribe_with_whispercpp(audio_path: str, model_path: str) -> str:
-    """
-    Transcribe audio file using the WhisperCpp backend (same as _WhisperCppRecognizer in stream.py).
-    Requires: pip install whisper-cpp-python
-    """
-    try:
-        import numpy as np
-        from whisper_cpp_python import Whisper
-    except ImportError:
-        raise RuntimeError(
-            "whisper_cpp_python or numpy not installed.\n"
-            "Run: pip install whisper-cpp-python numpy"
-        )
+def transcribe_with_whispercpp(audio_path: str, model) -> str:
+    """Transcribe audio using a pre-loaded WhisperCpp model."""
+    import numpy as np
 
     pcm = read_wav_pcm(audio_path)
     audio = np.frombuffer(pcm, dtype=np.int16).astype("float32") / 32768.0
-
-    whisper = Whisper(model_path)
-    segments = whisper.transcribe(audio, beam_size=1)
+    segments = model.transcribe(audio, beam_size=1)
     text = " ".join(seg.text for seg in segments).strip().lower()
     return text
 
@@ -141,6 +151,9 @@ def load_test_data(data_path: str) -> list[dict[str, str]]:
     samples: list[dict[str, str]] = []
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        if not reader.fieldnames or not {"audio_file", "transcript"}.issubset(reader.fieldnames):
+            logger.error("CSV missing required columns: audio_file, transcript")
+            sys.exit(1)
         for row in reader:
             samples.append({
                 "audio_file": row["audio_file"].strip(),
@@ -237,6 +250,15 @@ def main() -> None:
     hypotheses: list[str] = []
     detailed_results: list[dict] = []
 
+    # Load model ONCE before the loop
+    stt_model = None
+    if args.backend == "vosk":
+        logger.info("Loading Vosk model from %s ...", args.model)
+        stt_model = load_vosk_model(args.model)
+    elif args.backend == "whispercpp":
+        logger.info("Loading WhisperCpp model from %s ...", args.model)
+        stt_model = load_whispercpp_model(args.model)
+
     for i, sample in enumerate(samples, start=1):
         audio_file = sample["audio_file"]
         reference = sample["transcript"]
@@ -244,9 +266,9 @@ def main() -> None:
         # Transcribe
         try:
             if args.backend == "vosk":
-                hypothesis = transcribe_with_vosk(audio_file, args.model)
+                hypothesis = transcribe_with_vosk(audio_file, stt_model)
             elif args.backend == "whispercpp":
-                hypothesis = transcribe_with_whispercpp(audio_file, args.model)
+                hypothesis = transcribe_with_whispercpp(audio_file, stt_model)
             else:
                 hypothesis = transcribe_stub(audio_file, lang)
         except (FileNotFoundError, RuntimeError) as exc:
