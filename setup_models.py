@@ -7,6 +7,8 @@ import zipfile
 import argparse
 from pathlib import Path
 import urllib.request
+import urllib.error
+from tqdm import tqdm
 from huggingface_hub import hf_hub_download
 
 # Configure paths
@@ -29,31 +31,26 @@ LLM_OPTIONS = {
     }
 }
 
-class DownloadProgressBar:
-    """Tqdm-like simple progress bar using urllib.request"""
-    def __init__(self, description="Downloading"):
-        self.description = description
-        self.last_percent = -1
-
-    def __call__(self, block_num, block_size, total_size):
-        if total_size <= 0:
-            return
-        percent = int(block_num * block_size * 100 / total_size)
-        if percent != self.last_percent:
-            self.last_percent = percent
-            # Print a neat text-based progress bar
-            bar_length = 40
-            filled_length = int(round(bar_length * percent / 100))
-            bar = '=' * filled_length + '-' * (bar_length - filled_length)
-            sys.stdout.write(f"\r{self.description}: [{bar}] {percent}% completed")
-            sys.stdout.flush()
-            if percent >= 100:
-                sys.stdout.write("\n")
-
 def setup_directories():
     """Create models directory if it doesn't exist."""
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     print(f"[*] Verified models directory at: {MODELS_DIR}")
+
+def download_url_with_progress(url, dest_path, description, context=None):
+    """Download a URL to a file path showing progress with tqdm."""
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, context=context) as response:
+        total_size = int(response.info().get('Content-Length', 0))
+        block_size = 1024 * 8
+        
+        with tqdm(total=total_size, unit='B', unit_scale=True, desc=description, leave=True) as pbar:
+            with open(dest_path, 'wb') as f:
+                while True:
+                    chunk = response.read(block_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    pbar.update(len(chunk))
 
 def download_llm(selection="1"):
     """Download the selected LLM GGUF model from Hugging Face."""
@@ -65,7 +62,6 @@ def download_llm(selection="1"):
             repo_id=selected["repo_id"],
             filename=selected["filename"],
             local_dir=MODELS_DIR,
-            local_dir_use_symlinks=False
         )
         print(f"[+] LLM successfully downloaded to: {dest_path}")
         return Path(dest_path).relative_to(BASE_DIR)
@@ -81,13 +77,11 @@ def download_tts():
             repo_id="rhasspy/piper-voices",
             filename="en/en_US/lessac/medium/en_US-lessac-medium.onnx",
             local_dir=MODELS_DIR,
-            local_dir_use_symlinks=False
         )
         json_path = hf_hub_download(
             repo_id="rhasspy/piper-voices",
             filename="en/en_US/lessac/medium/en_US-lessac-medium.onnx.json",
             local_dir=MODELS_DIR,
-            local_dir_use_symlinks=False
         )
         # Move the downloaded voice files to the root of the models folder for easier reference
         dest_onnx = MODELS_DIR / "en_US-lessac-medium.onnx"
@@ -118,32 +112,30 @@ def download_asr():
         return dest_dir.relative_to(BASE_DIR)
 
     try:
-        # Download the zip file with bypass SSL validation context to prevent expired cert failures
-        context = ssl._create_unverified_context()
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        
-        with urllib.request.urlopen(req, context=context) as response:
-            total_size = int(response.info().get('Content-Length', 0))
-            block_size = 1024 * 8
-            downloaded = 0
+        # 1. Try standard verified secure download first
+        download_url_with_progress(url, zip_path, "ASR Model Zip")
+    except Exception as e:
+        # Check if the failure looks like an SSL verification/certificate issue
+        err_msg = str(e).lower()
+        if "ssl" in err_msg or "certificate" in err_msg or "verify" in err_msg:
+            print("\n" + "=" * 70)
+            print("[WARNING] Secure SSL connection failed due to certificate verification issues.")
+            print("[WARNING] (This is typically caused by an expired certificate on the hosting domain.)")
+            print("[WARNING] Falling back to bypass SSL verification context safely...")
+            print("=" * 70 + "\n")
             
-            with open(zip_path, 'wb') as f:
-                while True:
-                    chunk = response.read(block_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    
-                    if total_size > 0:
-                        percent = int(downloaded * 100 / total_size)
-                        bar_length = 40
-                        filled_length = int(round(bar_length * percent / 100))
-                        bar = '=' * filled_length + '-' * (bar_length - filled_length)
-                        sys.stdout.write(f"\rASR Model Zip: [{bar}] {percent}% completed")
-                        sys.stdout.flush()
-                sys.stdout.write("\n")
+            try:
+                # 2. Safely fall back to unverified context with warning shown to user
+                unverified_context = ssl._create_unverified_context()
+                download_url_with_progress(url, zip_path, "ASR Model Zip (Bypass-SSL)", context=unverified_context)
+            except Exception as inner_e:
+                print(f"[-] Error downloading ASR model even after SSL bypass: {inner_e}")
+                sys.exit(1)
+        else:
+            print(f"[-] Error downloading ASR: {e}")
+            sys.exit(1)
 
+    try:
         print("[*] Extracting ASR model...")
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(MODELS_DIR)
@@ -153,30 +145,22 @@ def download_asr():
         print(f"[+] ASR Model extracted successfully to: {dest_dir}")
         return dest_dir.relative_to(BASE_DIR)
     except Exception as e:
-        print(f"[-] Error downloading or extracting ASR: {e}")
+        print(f"[-] Error extracting ASR zip file: {e}")
         if zip_path.exists():
             zip_path.unlink()
         sys.exit(1)
 
 def update_env(llm_path, tts_path, asr_path):
-    """Generate or update the .env file with the downloaded model paths."""
+    """Non-destructively generate or update the .env file with the downloaded model paths."""
     print("\n[*] Configuring .env file...")
     
-    # Read existing env if any
-    env_lines = {}
-    if ENV_FILE.exists():
-        with open(ENV_FILE, "r") as f:
-            for line in f:
-                if "=" in line:
-                    key, val = line.strip().split("=", 1)
-                    env_lines[key] = val
-
-    # Update paths (normalized for multi-platform support)
-    env_lines["MODEL_PATH"] = str(llm_path).replace("\\", "/")
-    env_lines["PIPER_VOICE"] = str(tts_path).replace("\\", "/")
-    env_lines["ASR_MODEL_PATH"] = str(asr_path).replace("\\", "/")
+    updates = {
+        "MODEL_PATH": str(llm_path).replace("\\", "/"),
+        "PIPER_VOICE": str(tts_path).replace("\\", "/"),
+        "ASR_MODEL_PATH": str(asr_path).replace("\\", "/"),
+    }
     
-    # Set default variables if missing
+    # Defaults template if the .env file does not exist or has no variables
     defaults = {
         "GRPC_PORT": "50051",
         "VAD_AGGRESSIVENESS": "2",
@@ -187,16 +171,63 @@ def update_env(llm_path, tts_path, asr_path):
         "TTS_EAGER_MIN_WORDS": "3",
         "PLAYER_BLOCKSIZE": "128"
     }
-    for k, v in defaults.items():
-        if k not in env_lines:
-            env_lines[k] = v
 
-    # Write back to .env
-    with open(ENV_FILE, "w") as f:
-        for k, v in env_lines.items():
-            f.write(f"{k}={v}\n")
+    # Load existing file lines
+    lines = []
+    existing_keys = set()
     
-    print("[+] Successfully generated .env file!")
+    if ENV_FILE.exists():
+        with open(ENV_FILE, "r") as f:
+            lines = f.readlines()
+        
+        # Parse currently set keys cleanly (stripping whitespace to prevent duplicates)
+        for line in lines:
+            if "=" in line and not line.strip().startswith("#"):
+                key, _ = line.split("=", 1)
+                existing_keys.add(key.strip())
+    else:
+        # Initialize with .env.example template if available to preserve comments
+        if ENV_EXAMPLE.exists():
+            print("[*] Initializing .env from .env.example template...")
+            with open(ENV_EXAMPLE, "r") as f:
+                lines = f.readlines()
+            for line in lines:
+                if "=" in line and not line.strip().startswith("#"):
+                    key, _ = line.split("=", 1)
+                    existing_keys.add(key.strip())
+        else:
+            # Otherwise use default keys
+            for k, v in defaults.items():
+                if k not in updates:
+                    lines.append(f"{k}={v}\n")
+                    existing_keys.add(k)
+
+    # Process and build new lines non-destructively
+    new_lines = []
+    keys_updated = set()
+    
+    for line in lines:
+        if "=" in line and not line.strip().startswith("#"):
+            key, val = line.split("=", 1)
+            stripped_key = key.strip()
+            if stripped_key in updates:
+                new_lines.append(f"{stripped_key}={updates[stripped_key]}\n")
+                keys_updated.add(stripped_key)
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+
+    # Append any variables we have updates for that weren't already present in the file
+    for k, v in updates.items():
+        if k not in keys_updated:
+            new_lines.append(f"{k}={v}\n")
+
+    # Write back to .env non-destructively
+    with open(ENV_FILE, "w") as f:
+        f.writelines(new_lines)
+    
+    print("[+] Successfully updated .env file non-destructively!")
 
 def main():
     parser = argparse.ArgumentParser(description="Automated model downloader for voice-assistant pipeline.")
