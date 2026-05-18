@@ -1,33 +1,44 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
 class PartialTranscriptStabilizer:
-    min_stable_chars: int = 3
+    stable_prefix_words: int = 2
 
-    def __post_init__(self) -> None:
+    _prev_partial: str = field(default="", init=False)
+    _stable: str = field(default="", init=False)
+
+    def reset(self) -> None:
         self._prev_partial = ""
         self._stable = ""
 
     def update(self, partial: str) -> str:
         partial = partial.strip()
-        if not partial:
-            return self._stable
 
-        common = self._common_prefix(self._prev_partial, partial)
-        if len(common) >= self.min_stable_chars and len(common) >= len(self._stable):
-            self._stable = common
+        prev_words = self._prev_partial.split()
+        cur_words = partial.split()
+
+        stable_count = 0
+
+        for pw, cw in zip(prev_words, cur_words):
+            if pw == cw:
+                stable_count += 1
+            else:
+                break
+
+        if stable_count >= self.stable_prefix_words:
+            self._stable = " ".join(cur_words[:stable_count])
 
         self._prev_partial = partial
-        return self._stable
 
-    @staticmethod
-    def _common_prefix(a: str, b: str) -> str:
         out = []
-        for ca, cb in zip(a, b, strict=False):
-            if ca != cb:
-                break
-            out.append(ca)
-        return "".join(out).strip()
+
+        if self._stable:
+            out.append(self._stable)
+
+        if stable_count < len(cur_words):
+            out.extend(cur_words[stable_count:])
+
+        return " ".join(out)
