@@ -5,9 +5,9 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from typing import Any
 
 import grpc
+from vosk import KaldiRecognizer, Model
 
 from voice_assistant.asr.partial import PartialTranscriptStabilizer
 from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
@@ -31,9 +31,6 @@ except Exception as exc:  # pragma: no cover - runtime setup
 class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-
-        from vosk import Model
-
         self._vosk_model = Model(settings.asr_model_path)
 
         self.llm = StreamingLLMClient(
@@ -49,8 +46,6 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
     async def StreamVoice(
         self, request_iterator: AsyncIterator[pb2.AudioChunk], context: grpc.aio.ServicerContext
     ) -> AsyncIterator[pb2.AudioResponse]:
-        from vosk import KaldiRecognizer
-
         bench = BenchmarkTracker()
         vad = self._build_vad()
         recognizer = KaldiRecognizer(self._vosk_model, self.settings.sample_rate)
@@ -59,7 +54,6 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
         tts = PiperStreamingTTS(PiperConfig(self.settings.piper_voice_path), tts_queue, bench=bench)
 
         speech_buffer = bytearray()
-        token_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
 
         async for req in request_iterator:
             frame = req.pcm16
@@ -80,10 +74,14 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                 text = self._extract_final(recognizer)
                 speech_buffer.clear()
                 if not text.strip():
+                    vad.reset()
+                    partial_stabilizer = PartialTranscriptStabilizer()
+                    tts_queue.clear()
                     continue
 
                 bench.mark("prompt_sent_ts")
-                _ = asyncio.create_task(self.llm.stream_tokens(text, token_queue))
+                token_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
+                _ = asyncio.create_task(self.llm.stream_tokens(text, token_queue, bench=bench))
 
                 tokens: list[str] = []
                 first_audio_sent = False
@@ -107,6 +105,9 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
 
                 logger.info("metrics=%s", bench.snapshot())
                 bench.reset()
+                vad.reset()
+                partial_stabilizer = PartialTranscriptStabilizer()
+                tts_queue.clear()
 
     def _build_vad(self) -> VoiceActivityDetector:
         return VoiceActivityDetector(
@@ -119,12 +120,12 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
         )
 
     @staticmethod
-    def _extract_partial(recognizer: Any) -> str:
+    def _extract_partial(recognizer: KaldiRecognizer) -> str:
         data = json.loads(recognizer.PartialResult())
         return data.get("partial", "")
 
     @staticmethod
-    def _extract_final(recognizer: Any) -> str:
+    def _extract_final(recognizer: KaldiRecognizer) -> str:
         data = json.loads(recognizer.FinalResult())
         return data.get("text", "")
 
