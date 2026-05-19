@@ -42,6 +42,7 @@ class Settings:
     player_blocksize: int = int(os.getenv("PLAYER_BLOCKSIZE", "128"))
     llm_queue_maxsize: int = 128
     asr_queue_maxsize: int = 32
+    max_speech_buffer_bytes: int = int(os.getenv("ASR_MAX_SPEECH_BUFFER_BYTES", str(2 * 1024 * 1024)))
 
     topic_similarity_threshold: float = 0.55
 
