@@ -71,6 +71,36 @@ This project utilizes **Piper TTS** for sentence-chunked, non-blocking audio gen
 ```env
 MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
 PIPER_VOICE="models/en_US-lessac-medium.onnx"
+ASR_MODEL_PATH="models/vosk-model-small-en-us-0.15"
+ASR_BACKEND="vosk"
+VAD_AGGRESSIVENESS=2
+CHUNK_MS=20
+ASR_ENDPOINT_SILENCE_MS=60
+TTS_SENTENCE_MAX_TOKENS=8
+TTS_EAGER_MIN_WORDS=3
+PLAYER_BLOCKSIZE=128
+GRPC_PORT=50051
+```
+
+### 4. Installing Piper TTS
+
+Piper is used as the TTS engine and must be available on your `PATH`:
+
+**Option A — pip (Linux/macOS):**
+
+```bash
+pip install piper-tts
+```
+
+**Option B — Pre-built binary:**
+
+Download the latest release from [piper releases](https://github.com/rhasspy/piper/releases), extract the binary, and add it to your `PATH`.
+
+Verify the installation:
+
+```bash
+piper --help
+```
 
 ## gRPC mode
 
