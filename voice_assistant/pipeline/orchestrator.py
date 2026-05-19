@@ -8,6 +8,7 @@ import numpy as np
 from voice_assistant.asr.stream import ASREvent, StreamingASR
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.llm.client import StreamingLLMClient
+from voice_assistant.llm.kv_cache import KVCacheManager
 from typing import Optional, Any
 from voice_assistant.tts.player import AudioPlayer
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue
@@ -28,6 +29,7 @@ class VoicePipelineOrchestrator:
         player: AudioPlayer,
         bench: BenchmarkTracker,
         nlu: Optional[Any] = None,
+        kv_cache: Optional[KVCacheManager] = None,
         tts_backpressure_threshold: int = 3,
         tts_sentence_max_tokens: int = 8,
         tts_eager_min_words: int = 3,
@@ -49,6 +51,7 @@ class VoicePipelineOrchestrator:
         self.audio_queue: AudioChunkQueue = tts.queue
         self.interrupt_event = asyncio.Event()
         self.nlu = nlu
+        self.kv_cache = kv_cache
 
     async def asr_task(self) -> None:
         async for event in self.asr.stream_events():
@@ -78,12 +81,32 @@ class VoicePipelineOrchestrator:
                     logger.exception("nlu classification failed")
                 if self.interrupt_event.is_set():
                     self._drain_queue(self.token_queue)
+                    self.player.resume()
                     self.interrupt_event.clear()
+                # KV-cache: invalidate on topic shift, load if still relevant
+                if self.kv_cache is not None:
+                    if self.kv_cache.should_invalidate(prompt):
+                        logger.info("Topic shift detected — clearing KV cache")
+                        self.kv_cache.clear()
+                        span.set_attribute("kv_cache.action", "invalidated")
+                    else:
+                        try:
+                            loaded = self.kv_cache.load(self.llm._llama)
+                            span.set_attribute("kv_cache.action", "loaded" if loaded else "miss")
+                        except Exception:
+                            logger.debug("KV-cache load failed, continuing without cache")
                 self.bench.mark("prompt_sent_ts")
                 if self.audio_queue.empty():
                     await self._enqueue_ack_tone()
                 await self.llm.stream_tokens(prompt, self.token_queue)
                 await self.token_queue.put("<eos>")
+                # KV-cache: save state and update topic after generation
+                if self.kv_cache is not None:
+                    try:
+                        self.kv_cache.save(self.llm._llama)
+                        self.kv_cache.update_topic(prompt)
+                    except Exception:
+                        logger.debug("KV-cache save failed")
 
     async def tts_task(self) -> None:
         token_buf: list[str] = []
@@ -95,6 +118,7 @@ class VoicePipelineOrchestrator:
                 token_buf.clear()
                 self.audio_queue.clear()
                 self.player.interrupt()
+                self.player.resume()
                 self.interrupt_event.clear()
                 continue
 
