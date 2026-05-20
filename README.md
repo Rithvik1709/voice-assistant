@@ -63,9 +63,15 @@ This project utilizes **Piper TTS** for sentence-chunked, non-blocking audio gen
 * **Files Needed:** You need both the model file (`.onnx`) and its configuration file (`.json`).
 * **Recommended Voice:** `en_US-lessac-medium.onnx` and `en_US-lessac-medium.onnx.json`.
 
-### 3. Updating your `.env` File
+### 3. Automatic Speech Recognition (ASR) Model
+This pipeline utilizes **Vosk** for local speech-to-text decoding.
+* **Where to Download:** Download a compatible model from the official [Vosk Models list](https://alphacephei.com/vosk/models).
+* **Recommended Model:** `vosk-model-small-en-us-0.15` (for fast, low-latency CPU inference).
+* **How to Setup:** Extract the downloaded ZIP file and place the extracted folder directly into the `models` directory.
+
+### 4. Updating your `.env` File
 1. Create a new folder named `models` in the root directory of this project.
-2. Place your downloaded `.gguf`, `.onnx`, and `.json` files inside that folder.
+2. Place your downloaded `.gguf`, `.onnx`, `.json` files, and the extracted Vosk model folder inside that folder.
 3. Open your `.env` file and update the paths to point to your files:
 
 ```env
@@ -82,7 +88,7 @@ PLAYER_BLOCKSIZE=128
 GRPC_PORT=50051
 ```
 
-### 4. Installing Piper TTS
+### 5. Installing Piper TTS
 
 Piper is used as the TTS engine and must be available on your `PATH`:
 
