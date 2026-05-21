@@ -60,7 +60,7 @@ class VoicePipelineOrchestrator:
 
             if event.type == "final" and event.text.strip():
                 self.bench.mark("final_text_ts")
-                self.interrupt_event.clear()
+                self.interrupt_event.clear()  # new interaction starting
                 await self.prompt_queue.put(event.text)
 
     async def llm_task(self) -> None:
@@ -82,8 +82,14 @@ class VoicePipelineOrchestrator:
                 self.bench.mark("prompt_sent_ts")
                 if self.audio_queue.empty():
                     await self._enqueue_ack_tone()
-                await self.llm.stream_tokens(prompt, self.token_queue)
-                await self.token_queue.put("<eos>")
+                async for token in self.llm.stream_tokens_iter(prompt):
+                    if self.interrupt_event.is_set():
+                        logger.info("Interrupt mid-stream, stopping LLM generation")
+                        self._drain_queue(self.token_queue)
+                        break
+                    await self.token_queue.put(token)
+                else:
+                    await self.token_queue.put("<eos>")
 
     async def tts_task(self) -> None:
         token_buf: list[str] = []
@@ -95,6 +101,7 @@ class VoicePipelineOrchestrator:
                 token_buf.clear()
                 self.audio_queue.clear()
                 self.player.interrupt()
+                await self.tts.flush()
                 continue
 
             if token == "<eos>":

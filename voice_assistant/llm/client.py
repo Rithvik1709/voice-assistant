@@ -74,6 +74,34 @@ class StreamingLLMClient:
             span.set_attribute("llm.completion_tokens", len(assembled))
             return final_text
 
+    async def stream_tokens_iter(self, prompt: str):
+        """Stream tokens as an async generator for interrupt-aware consumption."""
+        if self.bench:
+            self.bench.mark("prompt_sent_ts")
+        with tracer.start_as_current_span("llm.stream_tokens_iter") as span:
+            first_token_seen = False
+
+            stream = self._llama.create_completion(
+                prompt=prompt,
+                max_tokens=self.config.max_tokens,
+                temperature=self.config.temperature,
+                stream=True,
+            )
+
+            start = time.perf_counter()
+            for packet in stream:
+                token = packet["choices"][0]["text"]
+                if not token:
+                    continue
+                if not first_token_seen:
+                    first_token_seen = True
+                    if self.bench:
+                        self.bench.mark("first_token_ts")
+                    ttft = (time.perf_counter() - start) * 1000.0
+                    logger.info("TTFT_ms=%.2f", ttft)
+                    span.set_attribute("llm.ttft_ms", ttft)
+                yield token
+
     def tokenize(self, text: str) -> list[int]:
         return self._llama.tokenize(text.encode("utf-8"), add_bos=False)
 
