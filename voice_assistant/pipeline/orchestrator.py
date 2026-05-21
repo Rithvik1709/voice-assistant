@@ -62,6 +62,7 @@ class VoicePipelineOrchestrator:
 
             if event.type == "final" and event.text.strip():
                 self.bench.mark("final_text_ts")
+                self.interrupt_event.clear()  # new interaction starting
                 await self.prompt_queue.put(event.text)
 
     async def llm_task(self) -> None:
@@ -69,7 +70,6 @@ class VoicePipelineOrchestrator:
             prompt = await self.prompt_queue.get()
             with tracer.start_as_current_span("orchestrator.process_prompt") as span:
                 span.set_attribute("prompt.length", len(prompt))
-                # run lightweight NLU (if provided) to tag the prompt with intent
                 try:
                     if self.nlu is not None:
                         intent = self.nlu.classify(prompt)
@@ -80,12 +80,17 @@ class VoicePipelineOrchestrator:
                     logger.exception("nlu classification failed")
                 if self.interrupt_event.is_set():
                     self._drain_queue(self.token_queue)
-                    self.interrupt_event.clear()
                 self.bench.mark("prompt_sent_ts")
                 if self.audio_queue.empty():
                     await self._enqueue_ack_tone()
-                await self.llm.stream_tokens(prompt, self.token_queue)
-                await self.token_queue.put("<eos>")
+                async for token in self.llm.stream_tokens_iter(prompt):
+                    if self.interrupt_event.is_set():
+                        logger.info("Interrupt mid-stream, stopping LLM generation")
+                        self._drain_queue(self.token_queue)
+                        break
+                    await self.token_queue.put(token)
+                else:
+                    await self.token_queue.put("<eos>")
 
     async def tts_task(self) -> None:
         token_buf: list[str] = []
@@ -98,7 +103,6 @@ class VoicePipelineOrchestrator:
                 self.audio_queue.clear()
                 self.player.interrupt()
                 await self.tts.flush()
-                self.interrupt_event.clear()
                 continue
 
             if token == "<eos>":
@@ -109,10 +113,6 @@ class VoicePipelineOrchestrator:
                 continue
 
             token_buf.append(token)
-            # Natural backpressure: if the audio queue is full, this task will 
-            # naturally slow down because synthesize_sentence (which puts to the queue) 
-            # is awaited. We don't need a manual sleep here that just wastes cycles.
-            
             ready = sentence_chunks_from_tokens(token_buf, max_tokens=self.tts_sentence_max_tokens)
             if ready:
                 for sentence in ready[:-1]:
