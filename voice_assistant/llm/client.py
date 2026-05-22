@@ -12,6 +12,15 @@ from opentelemetry import trace
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
+try:
+    from llama_cpp import Llama  # type: ignore
+    _LLAMA_AVAILABLE = True
+except ImportError:
+    _LLAMA_AVAILABLE = False
+    class Llama:  # type: ignore
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
 
 @dataclass(slots=True)
 class LLMConfig:
@@ -24,10 +33,8 @@ class LLMConfig:
 
 class StreamingLLMClient:
     def __init__(self, config: LLMConfig, bench: BenchmarkTracker | None = None) -> None:
-        try:
-            from llama_cpp import Llama
-        except Exception as exc:  # pragma: no cover - runtime dep
-            raise RuntimeError("llama-cpp-python is required") from exc
+        if not _LLAMA_AVAILABLE:
+            raise RuntimeError("llama-cpp-python is required")
 
         self._llama = Llama(
             model_path=config.model_path,
@@ -67,8 +74,11 @@ class StreamingLLMClient:
                     ttft = (time.perf_counter() - start) * 1000.0
                     logger.info("TTFT_ms=%.2f", ttft)
                     span.set_attribute("llm.ttft_ms", ttft)
-                assembled.append(token)
-                await out_queue.put(token)
+                try:
+                    await asyncio.wait_for(out_queue.put(token), timeout=5.0)
+                    assembled.append(token)
+                except asyncio.TimeoutError:
+                    logger.warning("LLM output queue backpressure; dropping token")
     
             final_text = "".join(assembled)
             span.set_attribute("llm.completion_tokens", len(assembled))

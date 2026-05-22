@@ -19,6 +19,15 @@ def test_vad_energy_mode_detects_speech_after_consecutive_frames() -> None:
     assert vad.detect_barge_in([speech, speech, speech]) is True
 
 def test_vad_detects_speech_in_noisy_audio() -> None:
+    import pytest
+    try:
+        import torch
+        from voice_assistant.asr.vad import load_silero_vad, VADIterator
+        if load_silero_vad is None or VADIterator is None or torch is None:
+            pytest.skip("silero-vad or torch dependencies are missing")
+    except ImportError:
+        pytest.skip("torch or silero-vad dependencies are missing")
+
     # 1. Setup VAD with 32ms frames explicitly for Silero, with a sensitive threshold for noise
     cfg = VADConfig(sample_rate=16_000, frame_ms=32, mode="silero", threshold=0.015)
     vad = VoiceActivityDetector(cfg)

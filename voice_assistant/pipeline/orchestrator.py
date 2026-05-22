@@ -4,8 +4,10 @@ import asyncio
 import logging
 
 import numpy as np
+from typing import TYPE_CHECKING
 
-from voice_assistant.asr.stream import ASREvent, StreamingASR
+if TYPE_CHECKING:
+    from voice_assistant.asr.stream import ASREvent, StreamingASR
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.llm.client import StreamingLLMClient
 from typing import Optional, Any
@@ -55,9 +57,20 @@ class VoicePipelineOrchestrator:
     async def asr_task(self) -> None:
         async for event in self.asr.stream_events():
             if event.type == "partial":
-                if self.partial_queue.full():
-                    _ = self.partial_queue.get_nowait()
-                await self.partial_queue.put(event)
+                # Keep the queue non-blocking and prefer freshest partials.
+                try:
+                    self.partial_queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    try:
+                        _ = self.partial_queue.get_nowait()
+                    except Exception:
+                        # If another consumer cleared it, ignore
+                        pass
+                    try:
+                        self.partial_queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        # Give up if still full; dropping a partial is acceptable.
+                        pass
                 continue
 
             if event.type == "final" and event.text.strip():
