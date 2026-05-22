@@ -63,7 +63,7 @@ class VoicePipelineOrchestrator:
                 except asyncio.QueueFull:
                     try:
                         _ = self.partial_queue.get_nowait()
-                    except Exception:
+                    except asyncio.QueueEmpty:
                         # If another consumer cleared it, ignore
                         pass
                     try:

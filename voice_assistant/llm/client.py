@@ -75,10 +75,11 @@ class StreamingLLMClient:
                     logger.info("TTFT_ms=%.2f", ttft)
                     span.set_attribute("llm.ttft_ms", ttft)
                 try:
-                    await asyncio.wait_for(out_queue.put(token), timeout=5.0)
+                    await asyncio.wait_for(out_queue.put(token), timeout=10.0)
                     assembled.append(token)
-                except asyncio.TimeoutError:
-                    logger.warning("LLM output queue backpressure; dropping token")
+                except asyncio.TimeoutError as exc:
+                    logger.error("LLM output queue backpressure; aborting generation task")
+                    raise RuntimeError("LLM output queue full; generation aborted") from exc
     
             final_text = "".join(assembled)
             span.set_attribute("llm.completion_tokens", len(assembled))
