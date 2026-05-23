@@ -1,3 +1,3 @@
-from .classifier import IntentClassifier, SimpleIntentClassifier
+from voice_assistant.nlu.classifier import IntentClassifier, SimpleIntentClassifier
 
 __all__ = ["IntentClassifier", "SimpleIntentClassifier"]

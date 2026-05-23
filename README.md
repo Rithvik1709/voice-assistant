@@ -33,6 +33,7 @@ Default low-latency mode target: sub-100ms perceived updates (ack tone + eager c
 - Barge-in interrupt handling (speech during playback cancels output)
 - gRPC bidirectional streaming mode for remote inference
 - Benchmark metrics: ASR latency, TTFT, TTS first chunk, end-to-end, RTF
+- Lightweight plugin system for NLU intents — add skills by dropping a single file
 
 ## Quickstart (local)
 
@@ -86,6 +87,40 @@ Client:
 
 - `python -m voice_assistant.main --mode client --target localhost:50051`
 
+## Skill Plugin System
+
+NLU intents are auto-discovered from `voice_assistant/skills/`. Each skill lives in its own file and declares the intents it handles — no core code changes needed.
+
+### Adding a Skill
+
+Drop a new `.py` file into `voice_assistant/skills/`:
+
+```python
+# skills/alarm.py
+INTENTS = {
+    "set_alarm": {
+        "keywords": ["alarm", "set alarm", "alarm set karo"],
+    },
+}
+
+def handle(intent, text, entities=None):
+    return {"response": f"Alarm set for {text}", "intent": intent}
+```
+
+- **`INTENTS`** — dict mapping intent names to keyword trigger phrases (used by the classifier)
+- **`handle(intent, text, entities)`** — optional handler called by `dispatch()`
+
+The registry (`SkillRegistry`) auto-discovers all files via `pkgutil`, registers keywords with `SimpleIntentClassifier`, and routes `dispatch()` calls to the matching handler. Duplicate intents across skills merge keywords and log a warning.
+
+### Built-in Skills
+
+| Skill | Intents |
+|---|---|
+| `greeting.py` | greeting |
+| `play_music.py` | play_music |
+| `stop.py` | stop |
+| `weather.py` | weather |
+
 ## Tests
 
 - `pytest -q`
@@ -95,3 +130,4 @@ Covers:
 - VAD frame/speech boundary behavior
 - Sentence chunking for streaming TTS
 - Speculative decode acceptance rate and fallback logic
+- Skill auto-discovery, keyword registration, handler dispatch, and end-to-end plugin workflow
