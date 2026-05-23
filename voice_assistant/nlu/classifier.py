@@ -1,19 +1,15 @@
-"""Lightweight intent classifier scaffold for multilingual / code-mixed NLU.
-
-This implements a minimal rule-based `SimpleIntentClassifier` that can be
-used as a starting point for intent classification. It intentionally has
-no runtime dependencies so it can be iterated on quickly.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 import re
 from typing import Dict, Protocol
 
+from voice_assistant.skills.registry import get_intent_keywords, dispatch as skill_dispatch
+
 
 class IntentClassifier(Protocol):
     def classify(self, text: str) -> Dict[str, object]:
-        """Return a small dict with at least `intent` and `confidence` keys."""
+        ...
 
 
 @dataclass
@@ -31,54 +27,13 @@ class _IntentResult:
 
 
 class SimpleIntentClassifier:
-    """A lightweight rule-based classifier supporting English + Hindi heuristics.
+    def __init__(self) -> None:
+        self._keywords: dict[str, list[str]] = {}
 
-    Features:
-    - Detects presence of Devanagari characters.
-    - Handles simple Hindi-English code-mixed queries.
-    - Uses keyword matching for demo intents.
-    - Returns a dict with `intent`, `confidence`, and `lang`.
-
-    This intentionally stays dependency-free for easy iteration and testing.
-    """
-
-    INTENT_KEYWORDS = {
-        "greeting": [
-            "hello",
-            "hi",
-            "hey",
-            "namaste",
-            "namaskar",
-        ],
-        "play_music": [
-            "play",
-            "play music",
-            "song",
-            "gaana",
-            "play the song",
-            "gaana chala do",
-            "music chala do",
-            "song baja do",
-        ],
-        "stop": [
-            "stop",
-            "pause",
-            "ruk",
-            "band karo",
-            "music band karo",
-        ],
-        "weather": [
-            "weather",
-            "kaa mausam",
-            "mausam",
-            "mosam",
-            "weather batao",
-            "mausam batao",
-        ],
-    }
+    def _load_keywords(self) -> dict[str, list[str]]:
+        return get_intent_keywords()
 
     def _normalize(self, text: str) -> str:
-        """Normalize text for lightweight matching."""
         text = text.lower()
         text = re.sub(r"[^\w\s]", " ", text)
         return " ".join(text.split())
@@ -93,15 +48,15 @@ class SimpleIntentClassifier:
         if not text or not text.strip():
             return {"intent": "none", "confidence": 0.0}
 
+        if not self._keywords:
+            self._keywords = self._load_keywords()
+
         lowered = self._normalize(text)
         devanagari = self._contains_devanagari(text)
 
-        # simple keyword scoring
-        scores: dict[str, int] = {
-            k: 0 for k in self.INTENT_KEYWORDS
-        }
+        scores: dict[str, int] = {k: 0 for k in self._keywords}
 
-        for intent, keys in self.INTENT_KEYWORDS.items():
+        for intent, keys in self._keywords.items():
             for kw in keys:
                 if f" {kw} " in f" {lowered} ":
                     scores[intent] += 1
@@ -123,11 +78,10 @@ class SimpleIntentClassifier:
                 {"lang": "und"},
             ).to_dict()
 
-        # confidence scales with count; clamp to [0.2, 0.95]
         confidence = min(0.95, 0.2 + 0.3 * best_score)
 
         extras = {
-            "lang": "hi" if devanagari else "en"
+            "lang": "hi" if devanagari else "en",
         }
 
         return _IntentResult(
@@ -135,3 +89,6 @@ class SimpleIntentClassifier:
             confidence,
             extras,
         ).to_dict()
+
+    def dispatch(self, intent: str, text: str, entities: dict | None = None) -> dict:
+        return skill_dispatch(intent, text, entities)
