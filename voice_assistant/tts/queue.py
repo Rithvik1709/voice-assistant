@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 class AudioChunk:
     pcm16: bytes
     sample_rate: int
+    debug_text: str = ""
 
 
 class AudioChunkQueue:

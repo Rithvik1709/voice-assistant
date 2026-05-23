@@ -159,18 +159,17 @@ class PiperStreamingTTS:
 
     async def synthesize_sentence(self, sentence: str) -> bool:
         """
-        If the system is under heavy load, synthesize_sentence() may return False.
-        Callers should handle this by retrying or dropping low-priority messages.
+        If the system is under heavy load, synthesize_sentence() may raise RuntimeError.
         """
         if not sentence.strip():
             return True
         
         try:
-            await asyncio.wait_for(self.ingest_queue.put(sentence), timeout=0.1)
+            await asyncio.wait_for(self.ingest_queue.put(sentence), timeout=5.0)
             return True
-        except asyncio.TimeoutError:
-            logger.warning("Dropping input due to backpressure")
-            return False
+        except asyncio.TimeoutError as exc:
+            logger.error("TTS ingest queue full backpressure; aborting synthesis task")
+            raise RuntimeError("TTS ingest queue full; synthesis aborted") from exc
 
     async def _tts_worker(self):
         while self._running:
@@ -271,8 +270,17 @@ class PiperStreamingTTS:
             self.bench.add_synthesized_audio(dur_sec)
             self.bench.current.tts_end_ts = time.perf_counter()
 
-        for chunk in self._split_audio_chunks(pcm):
-            await safe_put(self.playback_queue, AudioChunk(pcm16=chunk, sample_rate=self.config.sample_rate))
+        chunks = list(self._split_audio_chunks(pcm))
+        for i, chunk in enumerate(chunks):
+            text_metadata = combined if i == 0 else ""
+            success = await safe_put(
+                self.playback_queue, 
+                AudioChunk(pcm16=chunk, sample_rate=self.config.sample_rate, debug_text=text_metadata),
+                timeout=5.0
+            )
+            if not success:
+                logger.error("TTS playback queue full backpressure; aborting synthesis task")
+                raise RuntimeError("TTS playback queue full; synthesis aborted")
 
     async def flush(self) -> None:
         """Wait until all queued sentences have been processed."""

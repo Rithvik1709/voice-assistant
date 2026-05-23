@@ -91,7 +91,7 @@ class MockPiperStreamingTTS:
     async def synthesize_sentence(self, sentence: str) -> bool:
         # Generate dummy 1 second 22050Hz 16-bit mono silent chunk
         pcm16 = b"\x00\x00" * 22050
-        chunk = AudioChunk(pcm16=pcm16, sample_rate=22050)
+        chunk = AudioChunk(pcm16=pcm16, sample_rate=22050, debug_text=sentence)
         try:
             await self.playback_queue.put(chunk)
             return True
@@ -168,24 +168,36 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
 
         active_llm_task: asyncio.Task | None = None
         active_response_task: asyncio.Task | None = None
+        active_audio_stream_task: asyncio.Task | None = None
 
-        async def cancel_active_response():
-            nonlocal active_llm_task, active_response_task
+        async def cancel_active_response(await_cleanup: bool = False):
+            nonlocal active_llm_task, active_response_task, active_audio_stream_task
             if active_llm_task and not active_llm_task.done():
                 active_llm_task.cancel()
-                try:
-                    await active_llm_task
-                except asyncio.CancelledError:
-                    pass
+                if await_cleanup:
+                    try:
+                        await active_llm_task
+                    except asyncio.CancelledError:
+                        pass
                 active_llm_task = None
 
             if active_response_task and not active_response_task.done():
                 active_response_task.cancel()
-                try:
-                    await active_response_task
-                except asyncio.CancelledError:
-                    pass
+                if await_cleanup:
+                    try:
+                        await active_response_task
+                    except asyncio.CancelledError:
+                        pass
                 active_response_task = None
+
+            if active_audio_stream_task and not active_audio_stream_task.done():
+                active_audio_stream_task.cancel()
+                if await_cleanup:
+                    try:
+                        await active_audio_stream_task
+                    except asyncio.CancelledError:
+                        pass
+                active_audio_stream_task = None
 
             # Drain token_queue
             while not token_queue.empty():
@@ -213,7 +225,7 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                     break
 
         async def read_requests():
-            nonlocal active_llm_task, active_response_task
+            nonlocal active_llm_task, active_response_task, active_audio_stream_task
             try:
                 async for req in request_iterator:
                     frame = req.pcm16
@@ -224,7 +236,7 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                     if speech:
                         if not speech_buffer:
                             # New speech starting! Trigger interruption if assistant is active
-                            await cancel_active_response()
+                            await cancel_active_response(await_cleanup=False)
                         speech_buffer.extend(frame)
                         continue
 
@@ -240,7 +252,7 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                         self.bench.mark("prompt_sent_ts")
 
                         # Cancel any active response first (though we likely already did when speech started)
-                        await cancel_active_response()
+                        await cancel_active_response(await_cleanup=False)
 
                         # Run LLM streaming in a background task and append "<eos>" at the end
                         async def run_llm():
@@ -258,7 +270,6 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                         # Start response processor task
                         async def process_response():
                             tokens: list[str] = []
-                            first_audio_sent = False
                             try:
                                 while True:
                                     tok = await token_queue.get()
@@ -266,54 +277,18 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                                         # Flush remaining tokens
                                         remaining_sentence = "".join(tokens).strip()
                                         if remaining_sentence:
-                                            try:
-                                                await asyncio.wait_for(tts.synthesize_sentence(remaining_sentence), timeout=30.0)
-                                                chunk = await asyncio.wait_for(tts_queue.get(), timeout=30.0)
-                                                if not first_audio_sent:
-                                                    first_audio_sent = True
-                                                await response_queue.put(pb2.AudioResponse(
-                                                    pcm16=chunk.pcm16,
-                                                    sample_rate=chunk.sample_rate,
-                                                    timestamp_ms=int(time.time() * 1000),
-                                                    debug_text=remaining_sentence,
-                                                ))
-                                            except asyncio.TimeoutError:
-                                                logger.warning("TTS synthesis/queue timeout during flush for sentence: %s", remaining_sentence)
+                                            await tts.synthesize_sentence(remaining_sentence)
                                         break
 
                                     tokens.append(tok)
                                     ready = sentence_chunks_from_tokens(tokens, max_tokens=self.settings.sentence_max_tokens)
                                     if ready and (len(ready) > 1 or ready[-1].endswith(('.', '!', '?'))):
                                         for sentence in ready[:-1]:
-                                            try:
-                                                await asyncio.wait_for(tts.synthesize_sentence(sentence), timeout=30.0)
-                                                chunk = await asyncio.wait_for(tts_queue.get(), timeout=30.0)
-                                                if not first_audio_sent:
-                                                    first_audio_sent = True
-                                                await response_queue.put(pb2.AudioResponse(
-                                                    pcm16=chunk.pcm16,
-                                                    sample_rate=chunk.sample_rate,
-                                                    timestamp_ms=int(time.time() * 1000),
-                                                    debug_text=sentence,
-                                                ))
-                                            except asyncio.TimeoutError:
-                                                logger.warning("TTS synthesis/queue timeout for sentence: %s", sentence)
+                                            await tts.synthesize_sentence(sentence)
 
                                         # If the last chunk is also a complete sentence, synthesize it immediately too
                                         if ready[-1].endswith(('.', '!', '?')):
-                                            try:
-                                                await asyncio.wait_for(tts.synthesize_sentence(ready[-1]), timeout=30.0)
-                                                chunk = await asyncio.wait_for(tts_queue.get(), timeout=30.0)
-                                                if not first_audio_sent:
-                                                    first_audio_sent = True
-                                                await response_queue.put(pb2.AudioResponse(
-                                                    pcm16=chunk.pcm16,
-                                                    sample_rate=chunk.sample_rate,
-                                                    timestamp_ms=int(time.time() * 1000),
-                                                    debug_text=ready[-1],
-                                                ))
-                                            except asyncio.TimeoutError:
-                                                logger.warning("TTS synthesis/queue timeout for sentence: %s", ready[-1])
+                                            await tts.synthesize_sentence(ready[-1])
                                             tokens = []
                                         else:
                                             tokens = [ready[-1]]
@@ -328,6 +303,24 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
 
                         active_response_task = asyncio.create_task(process_response())
 
+                        # Start independent audio streaming task to drain tts_queue
+                        async def stream_audio_responses():
+                            try:
+                                while True:
+                                    chunk = await tts_queue.get()
+                                    await response_queue.put(pb2.AudioResponse(
+                                        pcm16=chunk.pcm16,
+                                        sample_rate=chunk.sample_rate,
+                                        timestamp_ms=int(time.time() * 1000),
+                                        debug_text=chunk.debug_text,
+                                    ))
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as e:
+                                logger.error("Error in stream_audio_responses: %s", e)
+
+                        active_audio_stream_task = asyncio.create_task(stream_audio_responses())
+
             except asyncio.CancelledError:
                 logger.info("Request reader task was cancelled")
                 raise
@@ -340,6 +333,11 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                         await active_response_task
                     except Exception as e:
                         logger.error("Error waiting for active response task: %s", e)
+                if active_audio_stream_task and not active_audio_stream_task.done():
+                    try:
+                        await active_audio_stream_task
+                    except Exception as e:
+                        logger.error("Error waiting for active audio stream task: %s", e)
                 # Signal the response queue to stop yielding
                 await response_queue.put(None)
 
@@ -353,7 +351,7 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                 yield response
         finally:
             read_task.cancel()
-            await cancel_active_response()
+            await cancel_active_response(await_cleanup=True)
             try:
                 await read_task
             except asyncio.CancelledError:

@@ -18,7 +18,6 @@ jobs:
       - name: Set up Python 3.11
         uses: actions/setup-python@82c7e60c44026adc22a33c1672e4d96d9860b787 # v5.1.0
         with:
-          python-run: '3.11'
           python-version: '3.11'
 
       - name: Install System Dependencies
@@ -44,26 +43,4 @@ jobs:
 
       - name: Assert Performance Budget (Processing p95 < 300ms)
         run: |
-          python -c "
-          import json, sys
-          try:
-              with open('bench_results.json') as f:
-                  res = json.load(f)
-              p95_first = res['summary']['first_audio_ms']['p95']
-              p95_last = res['summary']['last_audio_ms']['p95']
-              throughput = res['summary']['throughput_responses_per_sec']
-              
-              # Subtract 200ms of active client streaming time (2 frames of 100ms each)
-              net_p95_processing = max(0.0, p95_first - 200.0)
-              
-              print(f'=== PERFORMANCE METRICS ===')
-              print(f'Throughput: {throughput:.2f} resp/sec')
-              print(f'Raw p95 First Audio Latency: {p95_first:.2f}ms')
-              print(f'Net p95 ASR/TTS Processing Latency: {net_p95_processing:.2f}ms (Budget: 300ms)')
-              print(f'=============================')
-              assert net_p95_processing < 300.0, f'Net p95 ASR/TTS processing latency is too high: {net_p95_processing}ms'
-              print('SUCCESS: All performance metrics are within the performance budget!')
-          except Exception as e:
-              print(f'FAILURE: {e}', file=sys.stderr)
-              sys.exit(1)
-          "
+          python scripts/bench/assert_perf.py --res-file bench_results.json --budget 300 --active-streaming-time 200
