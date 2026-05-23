@@ -40,22 +40,21 @@ class StreamingLLMClient:
         self.config = config
         self.bench = bench
 
-    async def stream_tokens(
-        self,
-        prompt: str,
-        out_queue: asyncio.Queue[str],
-        bench: BenchmarkTracker | None = None,
-    ) -> str:
-        active_bench = bench or self.bench
-        if active_bench:
-            active_bench.mark("prompt_sent_ts")
+    async def stream_tokens(self, messages: list[dict[str, str]], out_queue: asyncio.Queue[str]) -> str:
+        if self.bench:
+            self.bench.mark("prompt_sent_ts")
+
+async def stream_tokens(self,messages: list[dict[str, str]],out_queue: asyncio.Queue[str],bench: BenchmarkTracker | None = None,) -> str:
+    active_bench = bench or self.bench
+    if active_bench:
+        active_bench.mark("prompt_sent_ts")
 
         with tracer.start_as_current_span("llm.stream_tokens") as span:
             first_token_seen = False
             assembled: list[str] = []
     
-            stream = self._llama.create_completion(
-                prompt=prompt,
+            stream = self._llama.create_chat_completion(
+                messages=messages,
                 max_tokens=self.config.max_tokens,
                 temperature=self.config.temperature,
                 stream=True,
@@ -63,7 +62,7 @@ class StreamingLLMClient:
     
             start = time.perf_counter()
             for packet in stream:
-                token = packet["choices"][0]["text"]
+                token = packet["choices"][0].get("delta", {}).get("content", "")
                 if not token:
                     continue
                 if not first_token_seen:
