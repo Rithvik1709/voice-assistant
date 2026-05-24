@@ -9,6 +9,7 @@ from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.config import Settings
 from voice_assistant.llm.client import LLMConfig, StreamingLLMClient
+from voice_assistant.llm.kv_cache import KVCacheManager
 from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
 from voice_assistant.tts.player import AudioPlayer
 from voice_assistant.tts.queue import AudioChunkQueue
@@ -43,6 +44,7 @@ async def run_local(settings: Settings) -> None:
         model_path=settings.asr_model_path,
         backend=settings.asr_backend,
         endpoint_silence_ms=settings.asr_endpoint_silence_ms,
+        max_buffer_bytes=settings.max_speech_buffer_bytes,
     )
 
     llm = StreamingLLMClient(
@@ -60,12 +62,15 @@ async def run_local(settings: Settings) -> None:
     tts = PiperStreamingTTS(PiperConfig(settings.piper_voice_path, settings.tts_sample_rate), queue=queue, bench=bench)
     player = AudioPlayer(sample_rate=settings.tts_sample_rate, blocksize=settings.player_blocksize)
 
+    kv_cache = KVCacheManager(similarity_threshold=settings.topic_similarity_threshold)
+
     orchestrator = VoicePipelineOrchestrator(
         asr=asr,
         llm=llm,
         tts=tts,
         player=player,
         nlu=SimpleIntentClassifier(),
+        kv_cache=kv_cache,
         bench=bench,
         tts_sentence_max_tokens=settings.sentence_max_tokens,
         tts_eager_min_words=settings.tts_eager_min_words,

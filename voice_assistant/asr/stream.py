@@ -71,12 +71,14 @@ class StreamingASR:
         model_path: str,
         backend: str = "vosk",
         endpoint_silence_ms: int = 60,
+        max_buffer_bytes: int = 2 * 1024 * 1024,
     ) -> None:
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
         self.vad = vad
         self.backend = backend
         self.endpoint_silence_s = max(0.01, endpoint_silence_ms / 1000.0)
+        self.max_buffer_bytes = max_buffer_bytes
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
         self._stabilizer = PartialTranscriptStabilizer()
 
@@ -127,6 +129,18 @@ class StreamingASR:
                         in_speech = True
                         last_speech_ts = time.perf_counter()
                         speech_buffer.extend(frame)
+
+                        # Guard against unbounded buffer growth (OOM prevention)
+                        if len(speech_buffer) > self.max_buffer_bytes:
+                            logger.warning(
+                                "Speech buffer exceeded %d bytes, force-flushing",
+                                self.max_buffer_bytes,
+                            )
+                            final_text, conf = self._flush_final(bytes(speech_buffer))
+                            if final_text:
+                                yield ASREvent("final", final_text, conf, now_ms)
+                            speech_buffer.clear()
+                            # Don't reset in_speech — user is still talking
 
                         if self.backend == "vosk":
                             self._rec.accept_waveform(frame)
