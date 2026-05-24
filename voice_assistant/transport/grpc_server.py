@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import os
@@ -131,6 +132,13 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
     async def StreamVoice(
         self, request_iterator: AsyncIterator[pb2.AudioChunk], context: grpc.aio.ServicerContext
     ) -> AsyncIterator[pb2.AudioResponse]:
+        bench = BenchmarkTracker()
+        vad = self._build_vad()
+        recognizer = KaldiRecognizer(self._vosk_model, self.settings.sample_rate)
+        partial_stabilizer = PartialTranscriptStabilizer()
+        tts_queue = AudioChunkQueue(maxsize=self.settings.tts_queue_maxsize)
+        tts = PiperStreamingTTS(PiperConfig(self.settings.piper_voice_path), tts_queue, bench=bench)
+
         speech_buffer = bytearray()
         
         # Mock mode uses energy VAD (no binary dependency). Production uses webrtc VAD (more accurate).
