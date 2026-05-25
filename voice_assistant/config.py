@@ -34,6 +34,10 @@ class Settings:
     llm_max_tokens: int = 256
     llm_temperature: float = 0.7
     llm_context_size: int = 4096
+    # Maximum number of dialogue turns (user + assistant pairs) kept in the
+    # sliding context window.  Older turns are evicted once this cap is hit.
+    # The system prompt, if any, is always preserved and does not count.
+    conversation_max_turns: int = int(os.getenv("CONVERSATION_MAX_TURNS", "10"))
 
     tts_sample_rate: int = 22_050
     sentence_max_tokens: int = int(os.getenv("TTS_SENTENCE_MAX_TOKENS", "8"))

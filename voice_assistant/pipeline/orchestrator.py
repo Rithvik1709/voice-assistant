@@ -8,6 +8,7 @@ import numpy as np
 from voice_assistant.asr.stream import ASREvent, StreamingASR
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.llm.client import StreamingLLMClient
+from voice_assistant.llm.history import ConversationHistory
 from typing import Optional, Any
 from voice_assistant.tts.player import AudioPlayer
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue, safe_put
@@ -34,6 +35,8 @@ class VoicePipelineOrchestrator:
         tts_sentence_max_tokens: int = 8,
         tts_eager_min_words: int = 3,
         ack_tone_ms: int = 55,
+        max_history_turns: int = 10,
+        system_prompt: Optional[str] = None,
     ) -> None:
         self.asr = asr
         self.llm = llm
@@ -51,7 +54,10 @@ class VoicePipelineOrchestrator:
         self.audio_queue: AudioChunkQueue = tts.playback_queue
         self.interrupt_event = asyncio.Event()
         self.nlu = nlu
-        self.conversation_history: list[dict[str, str]] = []
+        self.conversation_history = ConversationHistory(
+            max_turns=max_history_turns,
+            system_prompt=system_prompt,
+        )
 
 
     async def asr_task(self) -> None:
@@ -86,10 +92,15 @@ class VoicePipelineOrchestrator:
                 self.bench.mark("prompt_sent_ts")
                 if self.audio_queue.empty():
                     await self._enqueue_ack_tone()
-                
-                self.conversation_history.append({"role": "user", "content": prompt})
-                assistant_reply = await self.llm.stream_tokens(self.conversation_history, self.token_queue)
-                self.conversation_history.append({"role": "assistant", "content": assistant_reply})
+
+                self.conversation_history.append_user(prompt)
+                assistant_reply = await self.llm.stream_tokens(self.conversation_history.messages(), self.token_queue)
+                self.conversation_history.append_assistant(assistant_reply)
+                logger.debug(
+                    "conversation_history: %d turn(s) retained (cap=%d)",
+                    self.conversation_history.turn_count,
+                    self.conversation_history.max_turns,
+                )
                 
                 await self.token_queue.put("<eos>")
 

@@ -69,6 +69,7 @@ async def run_local(settings: Settings) -> None:
         bench=bench,
         tts_sentence_max_tokens=settings.sentence_max_tokens,
         tts_eager_min_words=settings.tts_eager_min_words,
+        max_history_turns=settings.conversation_max_turns,
     )
     await orchestrator.run()
 
