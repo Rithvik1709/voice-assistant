@@ -9,7 +9,7 @@ from voice_assistant.tts.stream import PiperConfig, PiperStreamingTTS
 def _make_tts() -> PiperStreamingTTS:
     return PiperStreamingTTS(
         PiperConfig(voice_path=Path("fake.onnx")),
-        queue=AudioChunkQueue(maxsize=4),
+        playback_queue=AudioChunkQueue(maxsize=4),
     )
 
 

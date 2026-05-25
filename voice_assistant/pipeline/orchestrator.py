@@ -105,6 +105,7 @@ class VoicePipelineOrchestrator:
                 self.player.interrupt()
                 await self.tts.flush()
                 self.interrupt_event.clear()
+                self.player.resume()
                 continue
 
             if token == "<eos>":
