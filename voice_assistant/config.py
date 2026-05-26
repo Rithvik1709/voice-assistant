@@ -49,13 +49,65 @@ class Settings:
         self.chunk_size = int(self.sample_rate * self.chunk_ms / 1000)
 
     def validate(self) -> None:
-        required = {
-            "MODEL_PATH": self.model_path,
-            "PIPER_VOICE": self.piper_voice,
-        }
-        missing = [k for k, v in required.items() if not v]
-        if missing:
-            raise ValueError(f"Missing required environment values: {', '.join(missing)}")
+     required = {
+        "MODEL_PATH": self.model_path,
+        "PIPER_VOICE": self.piper_voice,
+        "ASR_MODEL_PATH": self.asr_model_path,
+    }
+
+     missing = [k for k, v in required.items() if not v]
+
+     if missing:
+        raise ValueError(
+            f"Missing required environment values: {', '.join(missing)}"
+        )
+
+     path_checks = {
+        "MODEL_PATH": self.model_path,
+        "PIPER_VOICE": self.piper_voice,
+        "ASR_MODEL_PATH": self.asr_model_path,
+    }
+
+     for name, path in path_checks.items():
+        if not Path(path).expanduser().exists():
+            raise FileNotFoundError(
+                f"{name} does not exist: {path}"
+            )
+
+     numeric_positive_checks = {
+        "sample_rate": self.sample_rate,
+        "chunk_ms": self.chunk_ms,
+        "chunk_size": self.chunk_size,
+        "grpc_port": self.grpc_port,
+        "tts_sample_rate": self.tts_sample_rate,
+        "sentence_max_tokens": self.sentence_max_tokens,
+        "tts_eager_min_words": self.tts_eager_min_words,
+        "tts_queue_maxsize": self.tts_queue_maxsize,
+        "player_blocksize": self.player_blocksize,
+        "llm_queue_maxsize": self.llm_queue_maxsize,
+        "asr_queue_maxsize": self.asr_queue_maxsize,
+    }
+
+     for name, value in numeric_positive_checks.items():
+        if value <= 0:
+            raise ValueError(
+                f"{name} must be greater than 0, got {value}"
+            )
+
+     if not 0 <= self.vad_aggressiveness <= 3:
+        raise ValueError(
+            "vad_aggressiveness must be between 0 and 3"
+        )
+
+     if not 0.0 <= self.topic_similarity_threshold <= 1.0:
+        raise ValueError(
+            "topic_similarity_threshold must be between 0.0 and 1.0"
+        )
+
+     if not 1024 <= self.grpc_port <= 65535:
+        raise ValueError(
+            f"grpc_port must be between 1024 and 65535, got {self.grpc_port}"
+        )
 
     @property
     def piper_voice_path(self) -> Path:
