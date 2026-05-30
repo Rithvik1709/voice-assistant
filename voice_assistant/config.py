@@ -49,6 +49,8 @@ class Settings:
         self.chunk_size = int(self.sample_rate * self.chunk_ms / 1000)
 
     def validate(self) -> None:
+        if os.getenv("MOCK_MODELS") == "1":
+            return
         required = {
             "MODEL_PATH": self.model_path,
             "PIPER_VOICE": self.piper_voice,

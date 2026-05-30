@@ -4,8 +4,10 @@ import asyncio
 import logging
 
 import numpy as np
+from typing import TYPE_CHECKING
 
-from voice_assistant.asr.stream import ASREvent, StreamingASR
+if TYPE_CHECKING:
+    from voice_assistant.asr.stream import ASREvent, StreamingASR
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.llm.client import StreamingLLMClient
 from typing import Optional, Any
@@ -51,13 +53,26 @@ class VoicePipelineOrchestrator:
         self.audio_queue: AudioChunkQueue = tts.playback_queue
         self.interrupt_event = asyncio.Event()
         self.nlu = nlu
+        self.conversation_history: list[dict[str, str]] = []
+
 
     async def asr_task(self) -> None:
         async for event in self.asr.stream_events():
             if event.type == "partial":
-                if self.partial_queue.full():
-                    _ = self.partial_queue.get_nowait()
-                await self.partial_queue.put(event)
+                # Keep the queue non-blocking and prefer freshest partials.
+                try:
+                    self.partial_queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    try:
+                        _ = self.partial_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        # If another consumer cleared it, ignore
+                        pass
+                    try:
+                        self.partial_queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        # Give up if still full; dropping a partial is acceptable.
+                        pass
                 continue
 
             if event.type == "final" and event.text.strip():
@@ -84,7 +99,11 @@ class VoicePipelineOrchestrator:
                 self.bench.mark("prompt_sent_ts")
                 if self.audio_queue.empty():
                     await self._enqueue_ack_tone()
-                await self.llm.stream_tokens(prompt, self.token_queue)
+                
+                self.conversation_history.append({"role": "user", "content": prompt})
+                assistant_reply = await self.llm.stream_tokens(self.conversation_history, self.token_queue)
+                self.conversation_history.append({"role": "assistant", "content": assistant_reply})
+                
                 await self.token_queue.put("<eos>")
 
     async def tts_task(self) -> None:

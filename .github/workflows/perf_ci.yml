@@ -1,0 +1,46 @@
+name: CI Performance Regression Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  performance:
+    name: Concurrent Load Performance Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@82c7e60c44026adc22a33c1672e4d96d9860b787 # v5.1.0
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev
+
+      - name: Install Package and Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Start gRPC Server in Mock Mode
+        env:
+          MOCK_MODELS: "1"
+        run: |
+          python -m voice_assistant.main --mode server --port 50051 &
+          sleep 3
+
+      - name: Run ASR 50-Client Concurrent Load Test
+        run: |
+          python scripts/bench/load_asr.py --concurrency 50 --frames-per-client 2 --out-file bench_results.json
+
+      - name: Assert Performance Budget (Processing p95 < 300ms)
+        run: |
+          python scripts/bench/assert_perf.py --res-file bench_results.json --budget 300 --active-streaming-time 200

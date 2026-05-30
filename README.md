@@ -52,16 +52,20 @@ Default low-latency mode target: sub-100ms perceived updates (ack tone + eager c
 To run this voice assistant in local mode, you need to download the Large Language Model (LLM) and Text-to-Speech (TTS) files manually and configure their paths.
 
 ### 1. Large Language Model (LLM)
+
 This pipeline uses `llama-cpp-python` for local inference, which requires models in the **GGUF** format.
-* **Recommended Model:** Llama-3-8B-Instruct or Mistral-7B-Instruct.
-* **Where to Download:** Search on Hugging Face (popular repositories include `QuantFactory` or `Bartowski`).
-* **Recommended Quantization:** Download the `Q4_K_M` or `Q5_K_M` version (e.g., `Meta-Llama-3-8B-Instruct-Q4_K_M.gguf`). This provides the best speed-to-performance ratio for low latency.
+
+- **Recommended Model:** Llama-3-8B-Instruct or Mistral-7B-Instruct.
+- **Where to Download:** Search on Hugging Face (popular repositories include `QuantFactory` or `Bartowski`).
+- **Recommended Quantization:** Download the `Q4_K_M` or `Q5_K_M` version (e.g., `Meta-Llama-3-8B-Instruct-Q4_K_M.gguf`). This provides the best speed-to-performance ratio for low latency.
 
 ### 2. Text-to-Speech (TTS) Model
+
 This project utilizes **Piper TTS** for sentence-chunked, non-blocking audio generation.
-* **Where to Download:** Visit the official Piper voice repository on Hugging Face or GitHub.
-* **Files Needed:** You need both the model file (`.onnx`) and its configuration file (`.json`).
-* **Recommended Voice:** `en_US-lessac-medium.onnx` and `en_US-lessac-medium.onnx.json`.
+
+- **Where to Download:** Visit the official Piper voice repository on Hugging Face or GitHub.
+- **Files Needed:** You need both the model file (`.onnx`) and its configuration file (`.json`).
+- **Recommended Voice:** `en_US-lessac-medium.onnx` and `en_US-lessac-medium.onnx.json`.
 
 ### 3. Automatic Speech Recognition (ASR) Model
 This pipeline utilizes **Vosk** for local speech-to-text decoding.
@@ -70,6 +74,8 @@ This pipeline utilizes **Vosk** for local speech-to-text decoding.
 * **How to Setup:** Extract the downloaded ZIP file and place the extracted folder directly into the `models` directory.
 
 ### 4. Updating your `.env` File
+### 3. Updating your `.env` File
+
 1. Create a new folder named `models` in the root directory of this project.
 2. Place your downloaded `.gguf`, `.onnx`, `.json` files, and the extracted Vosk model folder inside that folder.
 3. Open your `.env` file and update the paths to point to your files:
@@ -112,22 +118,81 @@ piper --help
 
 Generate protobuf stubs once:
 
-- `python -m grpc_tools.protoc -I voice_assistant/transport --python_out=voice_assistant/transport --grpc_python_out=voice_assistant/transport voice_assistant/transport/voice_assistant.proto`
+```bash
+python -m grpc_tools.protoc \
+-I. \
+--python_out=. \
+--grpc_python_out=. \
+voice_assistant/transport/voice_assistant.proto
+```
 
-Server:
+### Server
 
-- `python -m voice_assistant.main --mode server --host 0.0.0.0 --port 50051`
+```bash
+python -m voice_assistant.main --mode server --host 0.0.0.0 --port 50051
+```
 
-Client:
+### Client
 
-- `python -m voice_assistant.main --mode client --target localhost:50051`
+```bash
+python -m voice_assistant.main --mode client --target localhost:50051
+```
 
 ## Tests
 
-- `pytest -q`
+Run all tests:
 
-Covers:
+```bash
+pytest -q
+```
 
-- VAD frame/speech boundary behavior
+### Test Coverage
+
+The test suite currently covers:
+
+- VAD frame and speech boundary behavior
 - Sentence chunking for streaming TTS
-- Speculative decode acceptance rate and fallback logic
+- Speculative decode acceptance rate
+- Fallback logic for speculative decoding
+
+## Troubleshooting
+
+### Piper TTS model not found
+
+Ensure the following files exist inside the `models/` directory:
+
+```text
+models/
+├── en_US-lessac-medium.onnx
+└── en_US-lessac-medium.onnx.json
+```
+
+### LLM model path error
+
+Verify that the path in `.env` matches the downloaded GGUF file:
+
+```env
+MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
+```
+
+### Python version issues
+
+Use Python 3.11 or newer:
+
+```bash
+python --version
+```
+
+### Verify installation
+
+Run:
+
+```bash
+pytest -q
+```
+
+and then start the assistant:
+
+```bash
+python -m voice_assistant.main --mode local
+```
