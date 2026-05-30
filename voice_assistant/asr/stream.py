@@ -98,6 +98,9 @@ class StreamingASR:
         self.endpoint_silence_s = max(0.01, endpoint_silence_ms / 1000.0)
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
         self._stabilizer = PartialTranscriptStabilizer()
+        # Captured in stream_events() so the audio-thread callback can safely
+        # hand data to the asyncio event loop via call_soon_threadsafe().
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         if backend == "vosk":
             self._rec = _VoskRecognizer(model_path, sample_rate)
@@ -112,12 +115,24 @@ class StreamingASR:
         if frames <= 0:
             return
         raw = bytes(indata)
+        # PortAudio invokes this callback from a native C audio thread.
+        # asyncio.Queue is not thread-safe, so we must use call_soon_threadsafe()
+        # to schedule the put on the event-loop thread instead of calling
+        # put_nowait() directly (which silently deadlocks the consumer).
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._put_audio_nowait, raw)
+
+    def _put_audio_nowait(self, raw: bytes) -> None:
+        """Called on the event-loop thread via call_soon_threadsafe."""
         try:
             self._audio_queue.put_nowait(raw)
         except asyncio.QueueFull:
             logger.warning("ASR audio queue full; dropping frame")
 
     async def stream_events(self) -> AsyncIterator[ASREvent]:
+        # Capture the running event loop so _mic_callback (which runs in a
+        # native PortAudio thread) can safely post audio data here.
+        self._loop = asyncio.get_running_loop()
         frame_bytes = self.vad.frame_bytes
         speech_buffer = bytearray()
         in_speech = False

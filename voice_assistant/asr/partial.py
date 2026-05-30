@@ -6,13 +6,14 @@ from dataclasses import dataclass, field
 @dataclass(slots=True)
 class PartialTranscriptStabilizer:
     min_stable_chars: int = 3
+    _prev_partial: str = field(default="", init=False, repr=False)
+    _stable: str = field(default="", init=False, repr=False)
 
     _prev_partial: str = field(init=False)
     _stable: str = field(init=False)
 
     def __post_init__(self) -> None:
-        self._prev_partial = ""
-        self._stable = ""
+        pass  # fields are initialised by the dataclass machinery above
 
     def update(self, partial: str) -> str:
         partial = partial.strip()
