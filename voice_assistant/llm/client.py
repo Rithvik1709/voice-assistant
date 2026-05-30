@@ -47,14 +47,10 @@ class StreamingLLMClient:
         self.config = config
         self.bench = bench
 
-    async def stream_tokens(self, messages: list[dict[str, str]], out_queue: asyncio.Queue[str]) -> str:
-        if self.bench:
-            self.bench.mark("prompt_sent_ts")
-
-async def stream_tokens(self,messages: list[dict[str, str]],out_queue: asyncio.Queue[str],bench: BenchmarkTracker | None = None,) -> str:
-    active_bench = bench or self.bench
-    if active_bench:
-        active_bench.mark("prompt_sent_ts")
+    async def stream_tokens(self, messages: list[dict[str, str]], out_queue: asyncio.Queue[str], bench: BenchmarkTracker | None = None) -> str:
+        active_bench = bench or self.bench
+        if active_bench:
+            active_bench.mark("prompt_sent_ts")
 
         with tracer.start_as_current_span("llm.stream_tokens") as span:
             first_token_seen = False

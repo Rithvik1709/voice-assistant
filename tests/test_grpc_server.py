@@ -118,9 +118,9 @@ async def test_grpc_server_stream_voice_barge_in(test_settings) -> None:
 async def test_llm_client_backpressure_abort() -> None:
     # Test StreamingLLMClient backpressure abort strategy when output queue is full
     mock_llama = MagicMock()
-    mock_llama.create_completion.return_value = [
-        {"choices": [{"text": "Hello"}]},
-        {"choices": [{"text": "world"}]},
+    mock_llama.create_chat_completion.return_value = [
+        {"choices": [{"delta": {"content": "Hello"}}]},
+        {"choices": [{"delta": {"content": "world"}}]},
     ]
     
     with patch("voice_assistant.llm.client.Llama", return_value=mock_llama), \
@@ -132,5 +132,5 @@ async def test_llm_client_backpressure_abort() -> None:
         # Force a tiny timeout for the test to run quickly
         with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
             with pytest.raises(RuntimeError) as exc_info:
-                await client.stream_tokens("test prompt", out_queue)
+                await client.stream_tokens([{"role": "user", "content": "test prompt"}], out_queue)
             assert "generation aborted" in str(exc_info.value)

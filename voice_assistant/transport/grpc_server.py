@@ -133,12 +133,7 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
         self, request_iterator: AsyncIterator[pb2.AudioChunk], context: grpc.aio.ServicerContext
     ) -> AsyncIterator[pb2.AudioResponse]:
         bench = BenchmarkTracker()
-        vad = self._build_vad()
-        recognizer = KaldiRecognizer(self._vosk_model, self.settings.sample_rate)
         partial_stabilizer = PartialTranscriptStabilizer()
-        tts_queue = AudioChunkQueue(maxsize=self.settings.tts_queue_maxsize)
-        tts = PiperStreamingTTS(PiperConfig(self.settings.piper_voice_path), tts_queue, bench=bench)
-
         speech_buffer = bytearray()
         
         # Mock mode uses energy VAD (no binary dependency). Production uses webrtc VAD (more accurate).
@@ -342,6 +337,7 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                     except Exception as e:
                         logger.error("Error waiting for active response task: %s", e)
                 if active_audio_stream_task and not active_audio_stream_task.done():
+                    active_audio_stream_task.cancel()
                     try:
                         await active_audio_stream_task
                     except Exception as e:
