@@ -67,15 +67,51 @@ This project utilizes **Piper TTS** for sentence-chunked, non-blocking audio gen
 - **Files Needed:** You need both the model file (`.onnx`) and its configuration file (`.json`).
 - **Recommended Voice:** `en_US-lessac-medium.onnx` and `en_US-lessac-medium.onnx.json`.
 
+### 3. Automatic Speech Recognition (ASR) Model
+This pipeline utilizes **Vosk** for local speech-to-text decoding.
+* **Where to Download:** Download a compatible model from the official [Vosk Models list](https://alphacephei.com/vosk/models).
+* **Recommended Model:** `vosk-model-small-en-us-0.15` (for fast, low-latency CPU inference).
+* **How to Setup:** Extract the downloaded ZIP file and place the extracted folder directly into the `models` directory.
+
+### 4. Updating your `.env` File
 ### 3. Updating your `.env` File
 
 1. Create a new folder named `models` in the root directory of this project.
-2. Place your downloaded `.gguf`, `.onnx`, and `.json` files inside that folder.
+2. Place your downloaded `.gguf`, `.onnx`, `.json` files, and the extracted Vosk model folder inside that folder.
 3. Open your `.env` file and update the paths to point to your files:
 
 ```env
 MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
 PIPER_VOICE="models/en_US-lessac-medium.onnx"
+ASR_MODEL_PATH="models/vosk-model-small-en-us-0.15"
+ASR_BACKEND="vosk"
+VAD_AGGRESSIVENESS=2
+CHUNK_MS=20
+ASR_ENDPOINT_SILENCE_MS=60
+TTS_SENTENCE_MAX_TOKENS=8
+TTS_EAGER_MIN_WORDS=3
+PLAYER_BLOCKSIZE=128
+GRPC_PORT=50051
+```
+
+### 5. Installing Piper TTS
+
+Piper is used as the TTS engine and must be available on your `PATH`:
+
+**Option A – pip (Linux/macOS):**
+
+```bash
+pip install piper-tts
+```
+
+**Option B – Pre-built binary:**
+
+Download the latest release from [piper releases](https://github.com/rhasspy/piper/releases), extract the binary, and add it to your `PATH`.
+
+Verify the installation:
+
+```bash
+piper --help
 ```
 
 ## gRPC mode
