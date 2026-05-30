@@ -84,9 +84,9 @@ Generate protobuf stubs once:
 
 ```bash
 python -m grpc_tools.protoc \
--I voice_assistant/transport \
---python_out=voice_assistant/transport \
---grpc_python_out=voice_assistant/transport \
+-I. \
+--python_out=. \
+--grpc_python_out=. \
 voice_assistant/transport/voice_assistant.proto
 ```
 
