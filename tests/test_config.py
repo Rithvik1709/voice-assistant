@@ -39,7 +39,7 @@ def test_validate_passes_when_required_model_paths_are_present():
     settings.validate()
 
 
-def test_piper_voice_path_expands_to_absolute_path():
+def test_piper_voice_path_expands_user_directory_to_absolute_path():
     settings = Settings(piper_voice="~/models/en_US-lessac-medium.onnx")
 
     assert settings.piper_voice_path.is_absolute()
