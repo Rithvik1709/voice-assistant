@@ -40,6 +40,7 @@ def test_validate_passes_when_required_model_paths_are_present():
 
 
 def test_piper_voice_path_expands_to_absolute_path():
-    settings = Settings(piper_voice="models/en_US-lessac-medium.onnx")
+    settings = Settings(piper_voice="~/models/en_US-lessac-medium.onnx")
 
     assert settings.piper_voice_path.is_absolute()
+    assert "~" not in str(settings.piper_voice_path)
