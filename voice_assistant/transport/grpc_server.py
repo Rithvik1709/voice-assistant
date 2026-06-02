@@ -66,7 +66,7 @@ class MockKaldiRecognizer:
 
 
 class MockLLMClient:
-    async def stream_tokens(self, prompt: str, out_queue: asyncio.Queue[str]) -> str:
+    async def stream_tokens(self, messages: list[dict[str, str]], out_queue: asyncio.Queue[str]) -> str:
         tokens = ["Hello", " this", " is", " a", " mock", " response", " from", " the", " assistant", "."]
         for tok in tokens:
             try:
@@ -265,7 +265,10 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                         # Run LLM streaming in a background task and append "<eos>" at the end
                         async def run_llm():
                             try:
-                                await self.llm.stream_tokens(text, token_queue)
+                                await self.llm.stream_tokens(
+                                    [{"role": "user", "content": text}],
+                                    token_queue,
+                                )
                             except asyncio.CancelledError:
                                 raise
                             except Exception as e:
