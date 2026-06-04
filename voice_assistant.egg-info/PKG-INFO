@@ -6,16 +6,21 @@ Author: voice-assistant
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
 Requires-Dist: python-dotenv>=1.0.1
-Requires-Dist: numpy>=1.26.4
 Requires-Dist: sounddevice>=0.4.6
+Requires-Dist: numpy>=1.26.4
 Requires-Dist: webrtcvad>=2.0.10
 Requires-Dist: silero-vad>=5.1.2
-Requires-Dist: vosk>=0.3.44
+Requires-Dist: vosk>=0.3.45
 Requires-Dist: llama-cpp-python>=0.3.0
 Requires-Dist: grpcio>=1.62.0
 Requires-Dist: grpcio-tools>=1.62.0
 Requires-Dist: aiortc>=1.7.0
-Requires-Dist: pytest>=8.0.0
+Requires-Dist: opentelemetry-api
+Requires-Dist: opentelemetry-sdk
+Requires-Dist: opentelemetry-exporter-otlp
+Requires-Dist: opentelemetry-instrumentation-grpc
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
 Provides-Extra: cuda
 Requires-Dist: llama-cpp-python[cuda]>=0.3.0; extra == "cuda"
 Provides-Extra: metal
