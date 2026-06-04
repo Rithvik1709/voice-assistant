@@ -95,13 +95,13 @@ async def amain() -> None:
         settings.validate()
 
     # --- Wake-word gate -------------------------------------------------------
-    # Only applies in modes that use the local microphone (local / server).
+    # Only applies in modes that use the local microphone (local / client).
     # Skipped entirely when --wakeword is not supplied.
-    if args.wakeword is not None and args.mode in {"local", "server"}:
+    if args.wakeword is not None and args.mode in {"local", "client"}:
         from voice_assistant.wakeword import WakeWordDetector
 
         detector = WakeWordDetector(model_name=args.wakeword)
-        detector.listen()  # blocks until the wake word is detected
+        await asyncio.to_thread(detector.listen)  # blocks until the wake word is detected
     # ---------------------------------------------------------------------------
 
     if args.mode == "local":
