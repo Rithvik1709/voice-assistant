@@ -1,0 +1,320 @@
+{
+  "summary": {
+    "concurrency": 50,
+    "clients_reported": 50,
+    "first_audio_ms": {
+      "p50": 358.99999999855936,
+      "p95": 375.0,
+      "p99": 375.0
+    },
+    "last_audio_ms": {
+      "p50": 389.9999999994179,
+      "p95": 405.9999999990396,
+      "p99": 405.9999999990396
+    },
+    "total_audio_responses": 100,
+    "throughput_responses_per_sec": 5.327650506137516
+  },
+  "clients": [
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.531,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.484,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.531,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.531,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.531,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.531,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.531,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.453,
+      "last_audio_ts": 15417.484,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.453,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.484,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.484,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.453,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.531,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.453,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.453,
+      "last_audio_ts": 15417.484,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.453,
+      "last_audio_ts": 15417.484,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.531,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.484,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.531,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.531,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.546,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.453,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.515,
+      "last_audio_ts": 15417.562,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.453,
+      "last_audio_ts": 15417.5,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.453,
+      "last_audio_ts": 15417.484,
+      "audio_responses": 2
+    },
+    {
+      "request_start": 15417.156,
+      "first_audio_ts": 15417.468,
+      "last_audio_ts": 15417.484,
+      "audio_responses": 2
+    }
+  ]
+}

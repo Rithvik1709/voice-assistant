@@ -8,7 +8,29 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import sounddevice as sd
+
+try:
+    from vosk import KaldiRecognizer, Model  # type: ignore
+    _VOSK_AVAILABLE = True
+except ImportError:
+    _VOSK_AVAILABLE = False
+    class Model:  # type: ignore
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+    class KaldiRecognizer:  # type: ignore
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+try:
+    from whisper_cpp_python import Whisper  # type: ignore
+    _WHISPER_AVAILABLE = True
+except ImportError:
+    _WHISPER_AVAILABLE = False
+    class Whisper:  # type: ignore
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
 
 from voice_assistant.asr.partial import PartialTranscriptStabilizer
 from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
@@ -26,7 +48,8 @@ class ASREvent:
 
 class _VoskRecognizer:
     def __init__(self, model_path: str, sample_rate: int) -> None:
-        from vosk import KaldiRecognizer, Model  # lazy import
+        if not _VOSK_AVAILABLE:
+            raise RuntimeError("vosk is not installed")
 
         model = Model(model_path)
         self.recognizer = KaldiRecognizer(model, sample_rate)
@@ -45,17 +68,13 @@ class _VoskRecognizer:
 
 class _WhisperCppRecognizer:
     def __init__(self, model_path: str, sample_rate: int) -> None:
-        try:
-            from whisper_cpp_python import Whisper
-        except Exception as exc:  # pragma: no cover - runtime dependency
-            raise RuntimeError("whisper_cpp_python is required for whisper.cpp backend") from exc
+        if not _WHISPER_AVAILABLE:
+            raise RuntimeError("whisper_cpp_python is required for whisper.cpp backend")
 
         self.whisper = Whisper(model_path)
         self.sample_rate = sample_rate
 
     def transcribe_chunk(self, pcm_bytes: bytes) -> tuple[str, float]:
-        import numpy as np
-
         audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype("float32") / 32768.0
         segments = self.whisper.transcribe(audio, beam_size=1)
         text = " ".join(seg.text for seg in segments).strip()
@@ -127,16 +146,6 @@ class StreamingASR:
                         in_speech = True
                         last_speech_ts = time.perf_counter()
                         speech_buffer.extend(frame)
-
-                        if self.backend == "vosk":
-                            self._rec.accept_waveform(frame)
-                            partial, conf = self._rec.partial_result()
-                        else:
-                            partial, conf = self._rec.transcribe_chunk(bytes(speech_buffer[-frame_bytes * 6 :]))
-
-                        stable = self._stabilizer.update(partial)
-                        if stable:
-                            yield ASREvent("partial", stable, conf, now_ms)
                     else:
                         if in_speech:
                             tail = time.perf_counter() - last_speech_ts

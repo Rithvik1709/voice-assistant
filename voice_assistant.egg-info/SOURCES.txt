@@ -1,5 +1,7 @@
 README.md
 pyproject.toml
+tests/test_nlu.py
+tests/test_piper_timeout.py
 tests/test_sentence_chunker.py
 tests/test_speculative.py
 tests/test_vad.py
@@ -7,6 +9,7 @@ voice_assistant/__init__.py
 voice_assistant/benchmark.py
 voice_assistant/config.py
 voice_assistant/main.py
+voice_assistant/telemetry.py
 voice_assistant.egg-info/PKG-INFO
 voice_assistant.egg-info/SOURCES.txt
 voice_assistant.egg-info/dependency_links.txt
@@ -20,6 +23,8 @@ voice_assistant/llm/__init__.py
 voice_assistant/llm/client.py
 voice_assistant/llm/kv_cache.py
 voice_assistant/llm/speculative.py
+voice_assistant/nlu/__init__.py
+voice_assistant/nlu/classifier.py
 voice_assistant/pipeline/__init__.py
 voice_assistant/pipeline/interrupt.py
 voice_assistant/pipeline/orchestrator.py

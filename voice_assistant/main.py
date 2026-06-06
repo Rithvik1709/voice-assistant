@@ -4,16 +4,8 @@ import argparse
 import asyncio
 import logging
 
-from voice_assistant.asr.stream import StreamingASR
-from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
-from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.config import Settings
-from voice_assistant.llm.client import LLMConfig, StreamingLLMClient
 from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
-from voice_assistant.tts.player import AudioPlayer
-from voice_assistant.tts.queue import AudioChunkQueue
-from voice_assistant.tts.stream import PiperConfig, PiperStreamingTTS
-from voice_assistant.nlu import SimpleIntentClassifier
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,6 +18,16 @@ def parse_args() -> argparse.Namespace:
 
 
 async def run_local(settings: Settings) -> None:
+    # Local-only imports to avoid requiring sounddevice when running in server mode
+    from voice_assistant.asr.stream import StreamingASR
+    from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
+    from voice_assistant.benchmark import BenchmarkTracker
+    from voice_assistant.llm.client import LLMConfig, StreamingLLMClient
+    from voice_assistant.tts.player import AudioPlayer
+    from voice_assistant.tts.queue import AudioChunkQueue
+    from voice_assistant.tts.stream import PiperConfig, PiperStreamingTTS
+    from voice_assistant.nlu import SimpleIntentClassifier
+
     bench = BenchmarkTracker()
     vad = VoiceActivityDetector(
         VADConfig(

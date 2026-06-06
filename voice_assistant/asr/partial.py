@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
 class PartialTranscriptStabilizer:
     min_stable_chars: int = 3
+
+    _prev_partial: str = field(init=False)
+    _stable: str = field(init=False)
 
     def __post_init__(self) -> None:
         self._prev_partial = ""
