@@ -55,7 +55,6 @@ def sentence_chunks_from_tokens(tokens: list[str], max_tokens: int = 28) -> list
                 out.append(" ".join(words[i:i + max_tokens]))
         else:
             out.append(chunk)
-
     return out
 
 
