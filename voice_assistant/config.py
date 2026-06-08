@@ -35,6 +35,12 @@ class Settings:
     llm_temperature: float = 0.7
     llm_context_size: int = 4096
 
+    # Maximum number of user-assistant conversation turns
+    # retained in memory before older history is pruned.
+    conversation_history_turns: int = int(
+        os.getenv("CONVERSATION_HISTORY_TURNS", "10")
+    )
+
     tts_sample_rate: int = 22_050
     sentence_max_tokens: int = int(os.getenv("TTS_SENTENCE_MAX_TOKENS", "8"))
     tts_eager_min_words: int = int(os.getenv("TTS_EAGER_MIN_WORDS", "3"))
@@ -51,14 +57,20 @@ class Settings:
     def validate(self) -> None:
         if os.getenv("MOCK_MODELS") == "1":
             return
+
         required = {
             "MODEL_PATH": self.model_path,
             "PIPER_VOICE": self.piper_voice,
         }
+
         missing = [k for k, v in required.items() if not v]
+
         if missing:
-            raise ValueError(f"Missing required environment values: {', '.join(missing)}")
+            raise ValueError(
+                f"Missing required environment values: {', '.join(missing)}"
+            )
 
     @property
     def piper_voice_path(self) -> Path:
         return Path(self.piper_voice).expanduser().resolve()
+    
