@@ -35,41 +35,35 @@ class AudioPlayer:
         _status: sd.CallbackFlags,
     ) -> None:
         with self._state_lock:
-            interrupted = self.state.interrupted
+            if self.state.interrupted:
+                outdata.fill(0)
+                return
 
-        if interrupted:
-            outdata.fill(0)
-            return
-
-        with self._state_lock:
             pending = self._pending
 
-        if len(pending) < frames:
-            parts = [pending]
-            needed = frames - len(pending)
+            if len(pending) < frames:
+                parts = [pending]
+                needed = frames - len(pending)
 
-            while needed > 0:
-                try:
-                    nxt = self._queue.get_nowait()
-                    parts.append(nxt)
-                    needed -= len(nxt)
-                except queue.Empty:
-                    break
+                while needed > 0:
+                    try:
+                        nxt = self._queue.get_nowait()
+                        parts.append(nxt)
+                        needed -= len(nxt)
+                    except queue.Empty:
+                        break
 
-            pending = np.concatenate(parts) if parts else pending
+                pending = np.concatenate(parts) if parts else pending
 
-        if len(pending) == 0:
-            outdata.fill(0)
-            return
+            if len(pending) == 0:
+                outdata.fill(0)
+                return
 
-        out = np.zeros((frames,), dtype=np.float32)
-        take = min(frames, len(pending))
+            out = np.zeros((frames,), dtype=np.float32)
+            take = min(frames, len(pending))
 
-        out[:take] = pending[:take]
-        remaining = pending[take:]
-
-        with self._state_lock:
-            self._pending = remaining
+            out[:take] = pending[:take]
+            self._pending = pending[take:]
 
         outdata[:, 0] = out
 
