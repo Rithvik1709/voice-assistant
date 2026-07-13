@@ -74,7 +74,6 @@ This pipeline utilizes **Vosk** for local speech-to-text decoding.
 * **How to Setup:** Extract the downloaded ZIP file and place the extracted folder directly into the `models` directory.
 
 ### 4. Updating your `.env` File
-### 3. Updating your `.env` File
 
 1. Create a new folder named `models` in the root directory of this project.
 2. Place your downloaded `.gguf`, `.onnx`, `.json` files, and the extracted Vosk model folder inside that folder.
