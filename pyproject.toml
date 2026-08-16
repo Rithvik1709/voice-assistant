@@ -1,14 +1,24 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "voice-assistant"
-version = "0.1.0"
+version = "1.0.0"
 description = "Real-time streaming voice assistant with ASR, LLM token streaming, and chunked TTS"
 readme = "README.md"
-requires-python = ">=3.10"
-authors = [{ name = "voice-assistant" }]
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "voice-assistant contributors" }]
+keywords = ["voice-assistant", "asr", "tts", "llm", "grpc", "streaming"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "python-dotenv>=1.0.1",
     "sounddevice>=0.4.6",
@@ -18,7 +28,6 @@ dependencies = [
     "vosk>=0.3.45",
     "llama-cpp-python>=0.3.0",
     "grpcio>=1.62.0",
-    "grpcio-tools>=1.62.0",
     "aiortc>=1.7.0",
     "opentelemetry-api",
     "opentelemetry-sdk",
@@ -30,6 +39,9 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "build>=1.2.0",
+    "grpcio-tools>=1.62.0",
+    "twine>=5.0.0",
 ]
 cuda = ["llama-cpp-python[cuda]>=0.3.0"]
 metal = ["llama-cpp-python[metal]>=0.3.0"]
@@ -38,6 +50,15 @@ metal = ["llama-cpp-python[metal]>=0.3.0"]
 where = ["."]
 include = ["voice_assistant*"]
 
+[tool.setuptools.package-data]
+"voice_assistant.transport" = ["*.proto"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+filterwarnings = [
+    "ignore:pkg_resources is deprecated as an API:UserWarning:webrtcvad",
+    "ignore:coroutine 'Queue\\.put' was never awaited:RuntimeWarning",
+    "ignore:path is deprecated\\. Use files\\(\\) instead\\.:DeprecationWarning:silero_vad\\.model",
+    "ignore:`torch\\.jit\\.load` is deprecated\\.:DeprecationWarning:torch\\.jit\\._serialization",
+]

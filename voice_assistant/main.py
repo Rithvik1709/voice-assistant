@@ -59,8 +59,15 @@ async def run_local(settings: Settings) -> None:
     )
 
     queue = AudioChunkQueue(maxsize=settings.tts_queue_maxsize)
-    tts = PiperStreamingTTS(PiperConfig(settings.piper_voice_path, settings.tts_sample_rate), queue=queue, bench=bench)
-    player = AudioPlayer(sample_rate=settings.tts_sample_rate, blocksize=settings.player_blocksize)
+    tts = PiperStreamingTTS(
+        PiperConfig(settings.piper_voice_path, settings.tts_sample_rate),
+        playback_queue=queue,
+        bench=bench,
+    )
+    player = AudioPlayer(
+        sample_rate=settings.tts_sample_rate,
+        blocksize=settings.player_blocksize,
+    )
 
     orchestrator = VoicePipelineOrchestrator(
         asr=asr,
@@ -71,12 +78,16 @@ async def run_local(settings: Settings) -> None:
         bench=bench,
         tts_sentence_max_tokens=settings.sentence_max_tokens,
         tts_eager_min_words=settings.tts_eager_min_words,
+        max_conversation_turns=settings.conversation_history_turns,
     )
     await orchestrator.run()
 
 
 async def amain() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
     from voice_assistant.telemetry import init_telemetry
     init_telemetry()
     args = parse_args()

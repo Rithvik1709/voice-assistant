@@ -26,12 +26,19 @@ class GRPCVoiceClient:
         self.chunk_size = chunk_size
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
         self._player = AudioPlayer(sample_rate=22_050)
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _mic_callback(self, indata, frames, _time, _status) -> None:
         if frames <= 0:
             return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(self._put_audio_frame, bytes(indata))
+
+    def _put_audio_frame(self, pcm16: bytes) -> None:
         try:
-            self._audio_queue.put_nowait(bytes(indata))
+            self._audio_queue.put_nowait(pcm16)
         except asyncio.QueueFull:
             pass
 
@@ -48,6 +55,7 @@ class GRPCVoiceClient:
                 yield pb2.AudioChunk(pcm16=pcm, sample_rate=self.sample_rate, timestamp_ms=int(time.time() * 1000))
 
     async def run(self) -> None:
+        self._loop = asyncio.get_running_loop()
         await self._player.start()
         async with grpc.aio.insecure_channel(self.target) as channel:
             stub = pb2_grpc.VoiceAssistantStub(channel)

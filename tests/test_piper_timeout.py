@@ -1,53 +1,78 @@
+import io
 import struct
-import subprocess
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 
 from voice_assistant.tts.stream import PiperConfig, PiperProcess, PiperStreamingTTS
 from voice_assistant.tts.queue import AudioChunkQueue
 
 
-@patch("voice_assistant.tts.stream.subprocess.Popen")
-def test_piper_process_success(mock_popen):
-    mock_proc = MagicMock()
-    mock_popen.return_value = mock_proc
-    mock_proc.poll.return_value = None
+class _ReadStream:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    def read(self, _size: int) -> bytes:
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+
+def test_piper_process_success(monkeypatch):
+    stdin = io.BytesIO()
 
     data_size = 100
     wav_header = b"RIFF" + b"\x00" * 36 + struct.pack("<I", data_size)
     pcm_data = b"\x00\x01" * 50
-
-    mock_proc.stdout.read.side_effect = [wav_header, pcm_data]
+    mock_proc = SimpleNamespace(
+        stdin=stdin,
+        stdout=_ReadStream([wav_header, pcm_data]),
+        poll=Mock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "voice_assistant.tts.stream.subprocess.Popen",
+        lambda *args, **kwargs: mock_proc,
+    )
 
     proc = PiperProcess(["fake_cmd"])
     res = proc.synthesize("hello")
 
     assert res == pcm_data
-    mock_proc.stdin.write.assert_called_once_with(b'{"text": "hello"}\n')
+    assert stdin.getvalue() == b'{"text": "hello"}\n'
 
 
-@patch("voice_assistant.tts.stream.subprocess.Popen")
-def test_piper_process_short_header(mock_popen):
-    mock_proc = MagicMock()
-    mock_popen.return_value = mock_proc
-    mock_proc.poll.return_value = None
-    mock_proc.stdout.read.return_value = b"short"
+def test_piper_process_short_header(monkeypatch):
+    mock_proc = SimpleNamespace(
+        stdin=io.BytesIO(),
+        stdout=_ReadStream([b"short"]),
+        poll=Mock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "voice_assistant.tts.stream.subprocess.Popen",
+        lambda *args, **kwargs: mock_proc,
+    )
 
     proc = PiperProcess(["fake_cmd"])
     res = proc.synthesize("hello")
     assert res == b""
 
 
-@patch("voice_assistant.tts.stream.subprocess.Popen")
-def test_piper_process_crashed(mock_popen):
-    mock_proc = MagicMock()
-    mock_popen.return_value = mock_proc
-    mock_proc.poll.return_value = 1  # process exited
+def test_piper_process_crashed(monkeypatch):
+    mock_proc = SimpleNamespace(
+        stdin=io.BytesIO(),
+        stdout=_ReadStream([]),
+        poll=Mock(return_value=1),
+    )
+    monkeypatch.setattr(
+        "voice_assistant.tts.stream.subprocess.Popen",
+        lambda *args, **kwargs: mock_proc,
+    )
 
     proc = PiperProcess(["fake_cmd"])
     with pytest.raises(RuntimeError, match="Piper process exited unexpectedly"):
         proc.synthesize("hello")
+
 
 def test_piper_streaming_tts_init():
     q = AudioChunkQueue(maxsize=1)

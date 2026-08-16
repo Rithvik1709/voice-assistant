@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,6 +63,8 @@ class Settings:
             "MODEL_PATH": self.model_path,
             "PIPER_VOICE": self.piper_voice,
         }
+        if self.asr_backend in {"vosk", "whispercpp"}:
+            required["ASR_MODEL_PATH"] = self.asr_model_path
 
         missing = [k for k, v in required.items() if not v]
 
@@ -70,7 +73,29 @@ class Settings:
                 f"Missing required environment values: {', '.join(missing)}"
             )
 
+        missing_paths = [
+            f"{name}={value}"
+            for name, value in required.items()
+            if value and not Path(value).expanduser().exists()
+        ]
+        if missing_paths:
+            raise ValueError(
+                "Configured model paths do not exist: "
+                + ", ".join(missing_paths)
+            )
+
+        if shutil.which("piper") is None:
+            raise ValueError(
+                "Piper executable not found on PATH. Install piper-tts or add "
+                "the Piper binary to PATH."
+            )
+
+        piper_config = Path(f"{self.piper_voice}.json").expanduser()
+        if not piper_config.exists():
+            raise ValueError(
+                f"Missing Piper voice config file: {piper_config}"
+            )
+
     @property
     def piper_voice_path(self) -> Path:
         return Path(self.piper_voice).expanduser().resolve()
-    

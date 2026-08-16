@@ -98,6 +98,7 @@ class StreamingASR:
         self.endpoint_silence_s = max(0.01, endpoint_silence_ms / 1000.0)
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
         self._stabilizer = PartialTranscriptStabilizer()
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         if backend == "vosk":
             self._rec = _VoskRecognizer(model_path, sample_rate)
@@ -106,18 +107,31 @@ class StreamingASR:
         else:
             raise ValueError(f"Unsupported ASR backend: {backend}")
 
-    def _mic_callback(self, indata: Any, frames: int, _time_info: Any, status: sd.CallbackFlags) -> None:
+    def _mic_callback(
+        self,
+        indata: Any,
+        frames: int,
+        _time_info: Any,
+        status: sd.CallbackFlags,
+    ) -> None:
         if status:
             logger.debug("Mic callback status: %s", status)
         if frames <= 0:
             return
         raw = bytes(indata)
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(self._put_audio_frame, raw)
+
+    def _put_audio_frame(self, raw: bytes) -> None:
         try:
             self._audio_queue.put_nowait(raw)
         except asyncio.QueueFull:
             logger.warning("ASR audio queue full; dropping frame")
 
     async def stream_events(self) -> AsyncIterator[ASREvent]:
+        self._loop = asyncio.get_running_loop()
         frame_bytes = self.vad.frame_bytes
         speech_buffer = bytearray()
         in_speech = False
@@ -146,22 +160,32 @@ class StreamingASR:
                         in_speech = True
                         last_speech_ts = time.perf_counter()
                         speech_buffer.extend(frame)
+
+                        if self.backend == "vosk":
+                            complete = self._rec.accept_waveform(frame)
+                            if not complete:
+                                partial, conf = self._rec.partial_result()
+                                stable = self._stabilizer.update(partial)
+                                if stable:
+                                    yield ASREvent("partial", stable, conf, now_ms)
                     else:
                         if in_speech:
                             tail = time.perf_counter() - last_speech_ts
                             if tail > self.endpoint_silence_s:
-                                final_text, conf = self._flush_final(bytes(speech_buffer))
+                                final_text, conf = self._flush_final(
+                                    bytes(speech_buffer)
+                                )
                                 if final_text:
                                     yield ASREvent("final", final_text, conf, now_ms)
                                 speech_buffer.clear()
                                 self.vad.reset()
+                                self._stabilizer = PartialTranscriptStabilizer()
                                 in_speech = False
 
     def _flush_final(self, utterance: bytes) -> tuple[str, float]:
         if not utterance:
             return "", 0.0
         if self.backend == "vosk":
-            self._rec.accept_waveform(utterance)
             return self._rec.final_result()
         return self._rec.transcribe_chunk(utterance)
 

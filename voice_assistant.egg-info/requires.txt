@@ -1,11 +1,11 @@
 python-dotenv>=1.0.1
 sounddevice>=0.4.6
-numpy>=1.26.4
+numpy<2.0.0,>=1.26.4
 webrtcvad>=2.0.10
 silero-vad>=5.1.2
 vosk>=0.3.45
+llama-cpp-python>=0.3.0
 grpcio>=1.62.0
-grpcio-tools>=1.62.0
 aiortc>=1.7.0
 opentelemetry-api
 opentelemetry-sdk
@@ -17,6 +17,10 @@ llama-cpp-python[cuda]>=0.3.0
 
 [dev]
 pytest>=8.0.0
+pytest-asyncio>=0.23.0
+build>=1.2.0
+grpcio-tools>=1.62.0
+twine>=5.0.0
 
 [metal]
 llama-cpp-python[metal]>=0.3.0

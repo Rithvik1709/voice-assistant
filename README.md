@@ -1,10 +1,41 @@
-# voice-assistant
+# Vaani
 
-Low-latency real-time streaming voice assistant pipeline:
+Vaani is a low-latency, open-source real-time voice AI pipeline for local and remote voice interaction.
 
-Mic → StreamingASR → PartialText → LLM (token streaming) → StreamingTTS → Speaker
+It combines streaming speech recognition, LLM response generation, and chunked text-to-speech into a single end-to-end system optimized for conversational responsiveness.
 
-## Latency Breakdown (target)
+## Release Status
+
+Vaani v1.0.0 is the first stable open-source release baseline. This version includes a working local pipeline, gRPC streaming mode, mock-model validation for CI, packaging metadata for distribution, and verified build/test checks.
+
+## Architecture
+
+```text
+Mic / Audio Input
+    ↓
+Streaming ASR + VAD
+    ↓
+Partial / Final transcript
+    ↓
+LLM token streaming
+    ↓
+Sentence chunked TTS
+    ↓
+Audio playback
+```
+
+## Highlights
+
+- Real-time ASR with VAD gating and partial/final speech detection
+- Low-latency LLM token streaming with TTFT instrumentation
+- Speculative decoding support and KV-cache compatibility hooks
+- Sentence-chunked Piper TTS synthesis with non-blocking playback
+- Barge-in interruption handling for live assistant interaction
+- gRPC server/client mode for remote deployment
+- Benchmark metrics for ASR latency, TTFT, TTS first-chunk latency, end-to-end latency, and RTF
+- Production-oriented configuration validation for model paths and runtime dependencies
+
+## Performance Targets
 
 ```text
 [Mic frames 20ms] -> [VAD boundary + partial ASR]
@@ -16,67 +47,96 @@ Mic → StreamingASR → PartialText → LLM (token streaming) → StreamingTTS 
               -> [Speaker out]
                     ~6-20ms
 
-Perceived first-response latency target: < 500ms local
-Default low-latency mode target: sub-100ms perceived updates (ack tone + eager chunking)
+Target perceived first-response latency: < 500ms local
+Target low-latency mode: sub-100ms perceived feedback for enabled updates
 ```
 
-## Features
+## Current Project Status
 
-- Chunked ASR with VAD gating and partial/final events
-- Streaming `llama-cpp-python` token callbacks with TTFT instrumentation
-- Speculative decoding helper (draft + target verify)
-- KV-cache reuse between turns via llama state save/load
-- Sentence-chunked Piper TTS synthesis streamed to non-blocking player
-- Low-latency mode defaults: shorter endpointing, eager TTS flush, 128-sample playback blocks
-- Optional immediate acknowledgement tone before LLM completion for sub-100ms perceived feedback
-- Async orchestrator with queue backpressure
-- Barge-in interrupt handling (speech during playback cancels output)
-- gRPC bidirectional streaming mode for remote inference
-- Benchmark metrics: ASR latency, TTFT, TTS first chunk, end-to-end, RTF
+This release is intended as a stable baseline for open-source experimentation and extension. It is ready for local deployment, benchmarking, and further community-driven development.
 
-## Quickstart (local)
+### Verified in v1.0.0
 
-1. Install Python 3.11+.
-2. Install dependencies:
-   - CPU: `pip install -e .`
-   - CUDA: `pip install -e .[cuda]`
-   - Apple Metal: `pip install -e .[metal]`
-3. Copy env:
-   - `cp .env.example .env`
-4. Fill model paths in `.env`.
-5. Run:
-   - `python -m voice_assistant.main --mode local`
+- 17 automated tests passing
+- source distribution build successful
+- wheel build successful
+- package metadata validation successful via Twine
 
-## 📂 Model Download & Setup Guide
+## Quickstart
 
-To run this voice assistant in local mode, you need to download the Large Language Model (LLM) and Text-to-Speech (TTS) files manually and configure their paths.
+### Requirements
 
-### 1. Large Language Model (LLM)
+- Python 3.11+
+- pip
+- local or remote model assets for ASR, LLM, and TTS
 
-This pipeline uses `llama-cpp-python` for local inference, which requires models in the **GGUF** format.
+### Install
 
-- **Recommended Model:** Llama-3-8B-Instruct or Mistral-7B-Instruct.
-- **Where to Download:** Search on Hugging Face (popular repositories include `QuantFactory` or `Bartowski`).
-- **Recommended Quantization:** Download the `Q4_K_M` or `Q5_K_M` version (e.g., `Meta-Llama-3-8B-Instruct-Q4_K_M.gguf`). This provides the best speed-to-performance ratio for low latency.
+```bash
+pip install -e .
+```
 
-### 2. Text-to-Speech (TTS) Model
+For CUDA or Metal builds:
 
-This project utilizes **Piper TTS** for sentence-chunked, non-blocking audio generation.
+```bash
+pip install -e .[cuda]
+pip install -e .[metal]
+```
 
-- **Where to Download:** Visit the official Piper voice repository on Hugging Face or GitHub.
-- **Files Needed:** You need both the model file (`.onnx`) and its configuration file (`.json`).
-- **Recommended Voice:** `en_US-lessac-medium.onnx` and `en_US-lessac-medium.onnx.json`.
+### Run locally
 
-### 3. Automatic Speech Recognition (ASR) Model
-This pipeline utilizes **Vosk** for local speech-to-text decoding.
-* **Where to Download:** Download a compatible model from the official [Vosk Models list](https://alphacephei.com/vosk/models).
-* **Recommended Model:** `vosk-model-small-en-us-0.15` (for fast, low-latency CPU inference).
-* **How to Setup:** Extract the downloaded ZIP file and place the extracted folder directly into the `models` directory.
+```bash
+python -m voice_assistant.main --mode local
+```
 
-### 4. Updating your `.env` File
-1. Create a new folder named `models` in the root directory of this project.
-2. Place your downloaded `.gguf`, `.onnx`, `.json` files, and the extracted Vosk model folder inside that folder.
-3. Open your `.env` file and update the paths to point to your files:
+## Model Setup
+
+To run Vaani locally, place the required model assets inside a `models/` directory and configure them in your environment.
+
+### 1. LLM model
+
+Vaani uses `llama-cpp-python` and expects a GGUF model.
+
+Recommended choices:
+- Llama-3-8B-Instruct
+- Mistral-7B-Instruct
+
+Preferred quantization:
+- Q4_K_M
+- Q5_K_M
+
+### 2. TTS model
+
+Vaani uses Piper TTS for streaming speech synthesis.
+
+Required files:
+- `en_US-lessac-medium.onnx`
+- `en_US-lessac-medium.onnx.json`
+
+Install Piper:
+
+```bash
+pip install piper-tts
+```
+
+Or use the official prebuilt binary and ensure it is available in your `PATH`.
+
+```bash
+piper --help
+```
+
+### 3. ASR model
+
+Vaani supports Vosk-based local ASR.
+
+Recommended model:
+- `vosk-model-small-en-us-0.15`
+
+Download from the official Vosk model repository and extract it into `models/`.
+
+## Environment Configuration
+
+Create a `.env` file with paths similar to the following:
 
 ```env
 MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
@@ -92,105 +152,73 @@ PLAYER_BLOCKSIZE=128
 GRPC_PORT=50051
 ```
 
-### 5. Installing Piper TTS
+## gRPC Mode
 
-Piper is used as the TTS engine and must be available on your `PATH`:
-
-**Option A – pip (Linux/macOS):**
-
-```bash
-pip install piper-tts
-```
-
-**Option B – Pre-built binary:**
-
-Download the latest release from [piper releases](https://github.com/rhasspy/piper/releases), extract the binary, and add it to your `PATH`.
-
-Verify the installation:
-
-```bash
-piper --help
-```
-
-## gRPC mode
-
-Generate protobuf stubs once:
+### Generate protobuf stubs
 
 ```bash
 python -m grpc_tools.protoc \
--I. \
---python_out=. \
---grpc_python_out=. \
-voice_assistant/transport/voice_assistant.proto
+  -I. \
+  --python_out=. \
+  --grpc_python_out=. \
+  voice_assistant/transport/voice_assistant.proto
 ```
 
-### Server
+### Start server
 
 ```bash
 python -m voice_assistant.main --mode server --host 0.0.0.0 --port 50051
 ```
 
-### Client
+### Connect client
 
 ```bash
 python -m voice_assistant.main --mode client --target localhost:50051
 ```
 
-## Tests
+## Benchmarking
 
-Run all tests:
+A local benchmark is included under the project’s benchmark tooling for latency and throughput measurements.
+
+Example:
 
 ```bash
+PYTHONPATH=. python3 scripts/bench/load_asr.py \
+  --host 127.0.0.1 \
+  --port 50051 \
+  --concurrency 10 \
+  --frames-per-client 30 \
+  --frame-ms 30 \
+  --sample-rate 16000
+```
+
+## Testing
+
+Install development dependencies and run the test suite:
+
+```bash
+pip install -e .[dev]
 pytest -q
 ```
 
-### Test Coverage
+## Project Roadmap
 
-The test suite currently covers:
+This release provides the stable core foundation. Planned areas of development include:
 
-- VAD frame and speech boundary behavior
-- Sentence chunking for streaming TTS
-- Speculative decode acceptance rate
-- Fallback logic for speculative decoding
+- broader model compatibility
+- improved latency tuning
+- better multi-turn memory handling
+- stronger deployment tooling
+- wider platform integrations
 
-## Troubleshooting
+## License
 
-### Piper TTS model not found
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
-Ensure the following files exist inside the `models/` directory:
+## Contributing
 
-```text
-models/
-├── en_US-lessac-medium.onnx
-└── en_US-lessac-medium.onnx.json
-```
+Contributions are welcome. Please open an issue or pull request for features, fixes, or improvements.
 
-### LLM model path error
+## Acknowledgements
 
-Verify that the path in `.env` matches the downloaded GGUF file:
-
-```env
-MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
-```
-
-### Python version issues
-
-Use Python 3.11 or newer:
-
-```bash
-python --version
-```
-
-### Verify installation
-
-Run:
-
-```bash
-pytest -q
-```
-
-and then start the assistant:
-
-```bash
-python -m voice_assistant.main --mode local
-```
+Vaani builds on the open-source ecosystem around `llama-cpp-python`, Piper TTS, Vosk, and the broader voice AI community.

@@ -1,5 +1,7 @@
+LICENSE
 README.md
 pyproject.toml
+tests/test_grpc_server.py
 tests/test_nlu.py
 tests/test_piper_timeout.py
 tests/test_sentence_chunker.py
@@ -31,6 +33,7 @@ voice_assistant/pipeline/orchestrator.py
 voice_assistant/transport/__init__.py
 voice_assistant/transport/grpc_client.py
 voice_assistant/transport/grpc_server.py
+voice_assistant/transport/voice_assistant.proto
 voice_assistant/transport/voice_assistant_pb2.py
 voice_assistant/transport/voice_assistant_pb2_grpc.py
 voice_assistant/transport/webrtc.py

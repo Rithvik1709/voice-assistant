@@ -9,9 +9,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import grpc
-from concurrent.futures import ThreadPoolExecutor
 
-from voice_assistant.asr.partial import PartialTranscriptStabilizer
 from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.config import Settings
@@ -66,7 +64,11 @@ class MockKaldiRecognizer:
 
 
 class MockLLMClient:
-    async def stream_tokens(self, prompt: str, out_queue: asyncio.Queue[str]) -> str:
+    async def stream_tokens(
+        self,
+        messages: list[dict[str, str]] | str,
+        out_queue: asyncio.Queue[str],
+    ) -> str:
         tokens = ["Hello", " this", " is", " a", " mock", " response", " from", " the", " assistant", "."]
         for tok in tokens:
             try:
@@ -98,6 +100,9 @@ class MockPiperStreamingTTS:
             return True
         except Exception:
             return False
+
+    async def flush(self) -> None:
+        pass
 
 
 # =====================================================================
@@ -133,8 +138,8 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
         self, request_iterator: AsyncIterator[pb2.AudioChunk], context: grpc.aio.ServicerContext
     ) -> AsyncIterator[pb2.AudioResponse]:
         bench = BenchmarkTracker()
-        partial_stabilizer = PartialTranscriptStabilizer()
         speech_buffer = bytearray()
+        conversation_history: list[dict[str, str]] = []
         
         # Mock mode uses energy VAD (no binary dependency). Production uses webrtc VAD (more accurate).
         vad_mode = "energy" if os.getenv("MOCK_MODELS") == "1" else "webrtc"
@@ -260,7 +265,23 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                         # Run LLM streaming in a background task and append "<eos>" at the end
                         async def run_llm():
                             try:
-                                await self.llm.stream_tokens(text, token_queue)
+                                conversation_history.append(
+                                    {"role": "user", "content": text}
+                                )
+                                assistant_reply = await self.llm.stream_tokens(
+                                    conversation_history,
+                                    token_queue,
+                                )
+                                conversation_history.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": assistant_reply,
+                                    }
+                                )
+                                max_messages = (
+                                    self.settings.conversation_history_turns * 2
+                                )
+                                del conversation_history[:-max_messages]
                             except asyncio.CancelledError:
                                 raise
                             except Exception as e:

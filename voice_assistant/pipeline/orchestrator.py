@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from voice_assistant.asr.stream import ASREvent, StreamingASR
 
 from voice_assistant.benchmark import BenchmarkTracker
-from voice_assistant.config import Settings
 from voice_assistant.llm.client import StreamingLLMClient
 from typing import Optional, Any
 from voice_assistant.tts.player import AudioPlayer
@@ -38,6 +37,7 @@ class VoicePipelineOrchestrator:
         tts_sentence_max_tokens: int = 8,
         tts_eager_min_words: int = 3,
         ack_tone_ms: int = 55,
+        max_conversation_turns: int = 10,
     ) -> None:
         self.asr = asr
         self.llm = llm
@@ -57,7 +57,7 @@ class VoicePipelineOrchestrator:
         self.nlu = nlu
 
         self.conversation_history: list[dict[str, str]] = []
-        self.max_conversation_turns = Settings().conversation_history_turns
+        self.max_conversation_turns = max(1, max_conversation_turns)
 
     async def asr_task(self) -> None:
         async for event in self.asr.stream_events():
@@ -302,4 +302,3 @@ class VoicePipelineOrchestrator:
                 sample_rate=sr,
             ),
         )
-        
