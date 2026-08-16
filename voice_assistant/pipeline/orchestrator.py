@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from voice_assistant.asr.stream import ASREvent, StreamingASR
+
 from voice_assistant.benchmark import BenchmarkTracker
+from voice_assistant.config import Settings
 from voice_assistant.llm.client import StreamingLLMClient
 from typing import Optional, Any
 from voice_assistant.tts.player import AudioPlayer
@@ -53,8 +55,9 @@ class VoicePipelineOrchestrator:
         self.audio_queue: AudioChunkQueue = tts.playback_queue
         self.interrupt_event = asyncio.Event()
         self.nlu = nlu
-        self.conversation_history: list[dict[str, str]] = []
 
+        self.conversation_history: list[dict[str, str]] = []
+        self.max_conversation_turns = Settings().conversation_history_turns
 
     async def asr_task(self) -> None:
         async for event in self.asr.stream_events():
@@ -82,32 +85,52 @@ class VoicePipelineOrchestrator:
     async def llm_task(self) -> None:
         while True:
             prompt = await self.prompt_queue.get()
+
             with tracer.start_as_current_span("orchestrator.process_prompt") as span:
                 span.set_attribute("prompt.length", len(prompt))
+
                 # run lightweight NLU (if provided) to tag the prompt with intent
                 try:
                     if self.nlu is not None:
                         intent = self.nlu.classify(prompt)
                         if isinstance(intent, dict):
                             span.set_attribute("nlu.intent", intent.get("intent", ""))
-                            span.set_attribute("nlu.confidence", float(intent.get("confidence", 0.0)))
+                            span.set_attribute(
+                                "nlu.confidence",
+                                float(intent.get("confidence", 0.0)),
+                            )
                 except Exception:
                     logger.exception("nlu classification failed")
+
                 if self.interrupt_event.is_set():
                     self._drain_queue(self.token_queue)
                     self.interrupt_event.clear()
+
                 self.bench.mark("prompt_sent_ts")
+
                 if self.audio_queue.empty():
                     await self._enqueue_ack_tone()
-                
-                self.conversation_history.append({"role": "user", "content": prompt})
-                assistant_reply = await self.llm.stream_tokens(self.conversation_history, self.token_queue)
-                self.conversation_history.append({"role": "assistant", "content": assistant_reply})
-                
+
+                self.conversation_history.append(
+                    {"role": "user", "content": prompt}
+                )
+                self._prune_conversation_history()
+
+                assistant_reply = await self.llm.stream_tokens(
+                    self.conversation_history,
+                    self.token_queue,
+                )
+
+                self.conversation_history.append(
+                    {"role": "assistant", "content": assistant_reply}
+                )
+                self._prune_conversation_history()
+
                 await self.token_queue.put("<eos>")
 
     async def tts_task(self) -> None:
         token_buf: list[str] = []
+
         while True:
             token = await self.token_queue.get()
 
@@ -123,29 +146,38 @@ class VoicePipelineOrchestrator:
             if token == "<eos>":
                 for sentence in sentence_chunks_from_tokens(token_buf):
                     await self._synthesize_with_retry(sentence)
+
                 await self.tts.flush()
                 token_buf.clear()
                 continue
 
             token_buf.append(token)
-            # Natural backpressure: if the audio queue is full, this task will 
-            # naturally slow down because synthesize_sentence (which puts to the queue) 
+
+            # Natural backpressure: if the audio queue is full, this task will
+            # naturally slow down because synthesize_sentence (which puts to the queue)
             # is awaited. We don't need a manual sleep here that just wastes cycles.
-            
-            ready = sentence_chunks_from_tokens(token_buf, max_tokens=self.tts_sentence_max_tokens)
+
+            ready = sentence_chunks_from_tokens(
+                token_buf,
+                max_tokens=self.tts_sentence_max_tokens,
+            )
+
             if ready:
                 for sentence in ready[:-1]:
                     await self._synthesize_with_retry(sentence)
+
                 token_buf = [ready[-1]]
 
             if token_buf and self._should_flush_eager(token_buf, token):
                 eager_text = "".join(token_buf).strip()
+
                 if eager_text:
                     await self._synthesize_with_retry(eager_text)
                     token_buf.clear()
 
     async def playback_task(self) -> None:
         await self.player.start()
+
         try:
             while True:
                 chunk = await self.audio_queue.get()
@@ -155,28 +187,33 @@ class VoicePipelineOrchestrator:
 
     async def run(self) -> None:
         await self.tts.start()
-        
+
         tasks = [
             asyncio.create_task(self.asr_task()),
             asyncio.create_task(self.llm_task()),
             asyncio.create_task(self.tts_task()),
             asyncio.create_task(self.playback_task()),
         ]
-        
+
         try:
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            done, pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+
             for t in done:
                 exc = t.exception()
                 if exc:
                     raise exc
-                    
+
         except asyncio.CancelledError:
             logger.info("Orchestrator shutting down gracefully...")
             raise
-            
+
         finally:
             for t in tasks:
                 t.cancel()
+
             await asyncio.gather(*tasks, return_exceptions=True)
             await self.tts.stop()
 
@@ -185,33 +222,84 @@ class VoicePipelineOrchestrator:
         while not q.empty():
             q.get_nowait()
 
-    async def _synthesize_with_retry(self, sentence: str, retries: int = 2) -> None:
+    def _prune_conversation_history(self) -> None:
+        max_messages = self.max_conversation_turns * 2
+
+        if len(self.conversation_history) > max_messages:
+            self.conversation_history = self.conversation_history[-max_messages:]
+
+    async def _synthesize_with_retry(
+        self,
+        sentence: str,
+        retries: int = 2,
+    ) -> None:
         for attempt in range(retries + 1):
             accepted = await self.tts.synthesize_sentence(sentence)
+
             if accepted:
                 return
-            if attempt < retries:
-                logger.warning(f"TTS backpressure, retrying sentence ({attempt + 1}/{retries}): {sentence[:50]}...")
-                await asyncio.sleep(TTS_RETRY_DELAY_S)
-        logger.error(f"Dropped sentence after {retries} retries due to TTS backpressure: {sentence[:50]}...")
 
-    def _should_flush_eager(self, token_buf: list[str], latest_token: str) -> bool:
+            if attempt < retries:
+                logger.warning(
+                    f"TTS backpressure, retrying sentence "
+                    f"({attempt + 1}/{retries}): {sentence[:50]}..."
+                )
+                await asyncio.sleep(TTS_RETRY_DELAY_S)
+
+        logger.error(
+            f"Dropped sentence after {retries} retries due to "
+            f"TTS backpressure: {sentence[:50]}..."
+        )
+
+    def _should_flush_eager(
+        self,
+        token_buf: list[str],
+        latest_token: str,
+    ) -> bool:
         text = "".join(token_buf).strip()
+
         if not text:
             return False
+
         word_count = len(text.split())
-        boundary = latest_token.endswith((" ", "\n", ".", ",", "!", "?", ";", ":"))
-        return word_count >= self.tts_eager_min_words and boundary
+        boundary = latest_token.endswith(
+            (" ", "\n", ".", ",", "!", "?", ";", ":")
+        )
+
+        return (
+            word_count >= self.tts_eager_min_words
+            and boundary
+        )
 
     async def _enqueue_ack_tone(self) -> None:
         duration = max(0.02, self.ack_tone_ms / 1000.0)
         sr = self.player.sample_rate
         samples = int(sr * duration)
+
         if samples <= 0:
             return
+
         t = np.arange(samples, dtype=np.float32) / float(sr)
         tone = 0.08 * np.sin(2.0 * np.pi * 880.0 * t)
-        pcm16 = np.clip(tone * 32767.0, -32768.0, 32767.0).astype(np.int16).tobytes()
+
+        pcm16 = (
+            np.clip(
+                tone * 32767.0,
+                -32768.0,
+                32767.0,
+            )
+            .astype(np.int16)
+            .tobytes()
+        )
+
         if self.bench.current.first_audio_ts is None:
             self.bench.mark("first_audio_ts")
-        await safe_put(self.audio_queue, AudioChunk(pcm16=pcm16, sample_rate=sr))
+
+        await safe_put(
+            self.audio_queue,
+            AudioChunk(
+                pcm16=pcm16,
+                sample_rate=sr,
+            ),
+        )
+        
