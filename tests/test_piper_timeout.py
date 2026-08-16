@@ -1,40 +1,56 @@
 import struct
-import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import pytest
 
 from voice_assistant.tts.stream import PiperConfig, PiperProcess, PiperStreamingTTS
 from voice_assistant.tts.queue import AudioChunkQueue
 
 
-def test_piper_process_success():
-    # Construct a valid WAV header with 200 bytes of PCM data
-    # Subchunk2Size is at offset 40-43
-    header = bytearray(44)
-    struct.pack_into('<I', header, 40, 200)
-    mock_pcm = b"\x00\x01" * 100
-    
+@patch("voice_assistant.tts.stream.subprocess.Popen")
+def test_piper_process_success(mock_popen):
     mock_proc = MagicMock()
-    mock_proc.stdin = MagicMock()
-    mock_proc.stdout = MagicMock()
-    mock_proc.stdout.read.side_effect = [header, mock_pcm]
+    mock_popen.return_value = mock_proc
     mock_proc.poll.return_value = None
 
-    with patch("voice_assistant.tts.stream.subprocess.Popen", return_value=mock_proc):
-        proc = PiperProcess(["piper"])
-        res = proc.synthesize("Hello world.")
-        assert res == mock_pcm
+    data_size = 100
+    wav_header = b"RIFF" + b"\x00" * 36 + struct.pack("<I", data_size)
+    pcm_data = b"\x00\x01" * 50
+
+    mock_proc.stdout.read.side_effect = [wav_header, pcm_data]
+
+    proc = PiperProcess(["fake_cmd"])
+    res = proc.synthesize("hello")
+
+    assert res == pcm_data
+    mock_proc.stdin.write.assert_called_once_with(b'{"text": "hello"}\n')
 
 
-def test_piper_process_exited():
+@patch("voice_assistant.tts.stream.subprocess.Popen")
+def test_piper_process_short_header(mock_popen):
     mock_proc = MagicMock()
-    mock_proc.stdin = MagicMock()
-    mock_proc.stdout = MagicMock()
-    mock_proc.poll.return_value = 1 # process exited
+    mock_popen.return_value = mock_proc
+    mock_proc.poll.return_value = None
+    mock_proc.stdout.read.return_value = b"short"
 
-    with patch("voice_assistant.tts.stream.subprocess.Popen", return_value=mock_proc):
-        proc = PiperProcess(["piper"])
-        try:
-            proc.synthesize("Hello world.")
-        except RuntimeError as e:
-            assert "exited unexpectedly" in str(e)
+    proc = PiperProcess(["fake_cmd"])
+    res = proc.synthesize("hello")
+    assert res == b""
+
+
+@patch("voice_assistant.tts.stream.subprocess.Popen")
+def test_piper_process_crashed(mock_popen):
+    mock_proc = MagicMock()
+    mock_popen.return_value = mock_proc
+    mock_proc.poll.return_value = 1  # process exited
+
+    proc = PiperProcess(["fake_cmd"])
+    with pytest.raises(RuntimeError, match="Piper process exited unexpectedly"):
+        proc.synthesize("hello")
+
+def test_piper_streaming_tts_init():
+    q = AudioChunkQueue(maxsize=1)
+    config = PiperConfig(voice_path="dummy", sample_rate=22050)
+    tts = PiperStreamingTTS(config=config, playback_queue=q)
+    assert tts.playback_queue is q

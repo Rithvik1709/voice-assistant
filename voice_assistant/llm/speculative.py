@@ -80,3 +80,4 @@ class SpeculativeDecoder:
         target_lp = self.target.logprob_next(prompt_tokens, token, self.config.temperature)
         ratio = min(1.0, pow(2.718281828, target_lp - draft_lp))
         return max(0.0, ratio)
+
