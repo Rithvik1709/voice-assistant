@@ -5,6 +5,7 @@
 ### Added
 
 - Setup doctor mode for checking model paths, Piper, gRPC port availability, and audio input.
+- Open-model bootstrap mode for previewing/downloading the starter model set and writing local env files.
 - Basic intent action hooks for deterministic responses before LLM fallback.
 - Optional JSONL session memory through `CONVERSATION_MEMORY_PATH`.
 

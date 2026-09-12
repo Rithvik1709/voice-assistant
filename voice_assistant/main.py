@@ -11,11 +11,15 @@ from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Real-time streaming voice assistant")
-    p.add_argument("--mode", choices=["local", "server", "client", "doctor"], default="local")
+    p.add_argument("--mode", choices=["local", "server", "client", "doctor", "models"], default="local")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=50051)
     p.add_argument("--target", default="localhost:50051")
     p.add_argument("--skip-audio-check", action="store_true")
+    p.add_argument("--models-dir", default="models")
+    p.add_argument("--download", action="store_true")
+    p.add_argument("--write-env", action="store_true")
+    p.add_argument("--env-file", default=".env")
     return p.parse_args()
 
 
@@ -111,6 +115,26 @@ async def amain() -> None:
         print(format_doctor_report(checks))
         if has_failures(checks):
             raise SystemExit(1)
+        return
+
+    if args.mode == "models":
+        from voice_assistant.model_setup import (
+            download_recommended_models,
+            format_model_plan,
+            write_env_file,
+        )
+
+        models_dir = Path(args.models_dir)
+        print(format_model_plan(models_dir))
+
+        if args.write_env:
+            wrote = write_env_file(Path(args.env_file), models_dir)
+            status = "wrote" if wrote else "kept existing"
+            print(f"{status}: {args.env_file}")
+
+        if args.download:
+            for message in download_recommended_models(models_dir):
+                print(message)
         return
 
     if args.mode in {"local", "server"}:
