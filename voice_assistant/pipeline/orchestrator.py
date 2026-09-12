@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from voice_assistant.asr.stream import ASREvent, StreamingASR
 
 from voice_assistant.benchmark import BenchmarkTracker
+from voice_assistant.actions import ActionHandler
 from voice_assistant.llm.client import StreamingLLMClient
 from typing import Optional, Any
 from voice_assistant.tts.player import AudioPlayer
@@ -38,6 +39,7 @@ class VoicePipelineOrchestrator:
         tts_eager_min_words: int = 3,
         ack_tone_ms: int = 55,
         max_conversation_turns: int = 10,
+        action_handler: Optional[ActionHandler] = None,
     ) -> None:
         self.asr = asr
         self.llm = llm
@@ -55,6 +57,7 @@ class VoicePipelineOrchestrator:
         self.audio_queue: AudioChunkQueue = tts.playback_queue
         self.interrupt_event = asyncio.Event()
         self.nlu = nlu
+        self.action_handler = action_handler
 
         self.conversation_history: list[dict[str, str]] = []
         self.max_conversation_turns = max(1, max_conversation_turns)
@@ -90,6 +93,7 @@ class VoicePipelineOrchestrator:
                 span.set_attribute("prompt.length", len(prompt))
 
                 # run lightweight NLU (if provided) to tag the prompt with intent
+                intent: dict[str, object] | None = None
                 try:
                     if self.nlu is not None:
                         intent = self.nlu.classify(prompt)
@@ -115,6 +119,19 @@ class VoicePipelineOrchestrator:
                     {"role": "user", "content": prompt}
                 )
                 self._prune_conversation_history()
+
+                if intent is not None and self.action_handler is not None:
+                    action_result = self.action_handler.handle(prompt, intent)
+                    if action_result.handled:
+                        response = action_result.response.strip()
+                        if response:
+                            await self._emit_text_response(response)
+                            self.conversation_history.append(
+                                {"role": "assistant", "content": response}
+                            )
+                            self._prune_conversation_history()
+                        await self.token_queue.put("<eos>")
+                        continue
 
                 assistant_reply = await self.llm.stream_tokens(
                     self.conversation_history,
@@ -227,6 +244,11 @@ class VoicePipelineOrchestrator:
 
         if len(self.conversation_history) > max_messages:
             self.conversation_history = self.conversation_history[-max_messages:]
+
+    async def _emit_text_response(self, response: str) -> None:
+        for token in response.split(" "):
+            await self.token_queue.put(token)
+            await self.token_queue.put(" ")
 
     async def _synthesize_with_retry(
         self,

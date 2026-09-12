@@ -31,6 +31,7 @@ Audio playback
 - Speculative decoding support and KV-cache compatibility hooks
 - Sentence-chunked Piper TTS synthesis with non-blocking playback
 - Barge-in interruption handling for live assistant interaction
+- Intent action hooks for deterministic commands before LLM fallback
 - gRPC server/client mode for remote deployment
 - Benchmark metrics for ASR latency, TTFT, TTS first-chunk latency, end-to-end latency, and RTF
 - Production-oriented configuration validation for model paths and runtime dependencies
