@@ -90,9 +90,11 @@ async def run_local(settings: Settings) -> None:
         nlu=SimpleIntentClassifier(),
         action_handler=BasicIntentActions(),
         memory=memory,
+        system_prompt=settings.assistant_system_prompt,
         bench=bench,
         tts_sentence_max_tokens=settings.sentence_max_tokens,
         tts_eager_min_words=settings.tts_eager_min_words,
+        ack_tone_ms=settings.ack_tone_ms if settings.enable_ack_tone else 0,
         max_conversation_turns=settings.conversation_history_turns,
     )
     await orchestrator.run()

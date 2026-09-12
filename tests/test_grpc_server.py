@@ -54,10 +54,11 @@ async def test_grpc_server_stream_voice_normal_flow(test_settings) -> None:
         async for response in service.StreamVoice(req_iterator(), mock_context):
             responses.append(response)
 
-        # We expect to get back silent audio responses with the debug text from mock LLM
+        # We expect an ack followed by mock LLM audio.
         assert len(responses) > 0
         assert responses[0].sample_rate == 22050
-        assert "mock response" in responses[0].debug_text.lower()
+        assert responses[0].debug_text == "[ack]"
+        assert any("mock response" in r.debug_text.lower() for r in responses)
 
 
 @pytest.mark.asyncio

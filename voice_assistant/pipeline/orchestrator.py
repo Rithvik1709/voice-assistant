@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import numpy as np
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -11,6 +10,7 @@ if TYPE_CHECKING:
 
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.actions import ActionHandler
+from voice_assistant.audio import make_ack_tone
 from voice_assistant.llm.client import StreamingLLMClient
 from voice_assistant.memory import SessionMemory
 from typing import Optional, Any
@@ -42,6 +42,7 @@ class VoicePipelineOrchestrator:
         max_conversation_turns: int = 10,
         action_handler: Optional[ActionHandler] = None,
         memory: Optional[SessionMemory] = None,
+        system_prompt: str = "",
     ) -> None:
         self.asr = asr
         self.llm = llm
@@ -61,6 +62,7 @@ class VoicePipelineOrchestrator:
         self.nlu = nlu
         self.action_handler = action_handler
         self.memory = memory
+        self.system_prompt = system_prompt.strip()
 
         self.max_conversation_turns = max(1, max_conversation_turns)
         self.conversation_history = self._load_conversation_history()
@@ -247,15 +249,30 @@ class VoicePipelineOrchestrator:
 
     def _prune_conversation_history(self) -> None:
         max_messages = self.max_conversation_turns * 2
+        system_messages = [
+            item for item in self.conversation_history
+            if item.get("role") == "system"
+        ]
+        chat_messages = [
+            item for item in self.conversation_history
+            if item.get("role") != "system"
+        ]
 
-        if len(self.conversation_history) > max_messages:
-            self.conversation_history = self.conversation_history[-max_messages:]
+        if len(chat_messages) > max_messages:
+            chat_messages = chat_messages[-max_messages:]
+
+        self.conversation_history = system_messages[:1] + chat_messages
 
     def _load_conversation_history(self) -> list[dict[str, str]]:
-        if self.memory is None:
-            return []
+        history = []
+        if self.system_prompt:
+            history.append({"role": "system", "content": self.system_prompt})
 
-        return self.memory.load_recent(self.max_conversation_turns * 2)
+        if self.memory is None:
+            return history
+
+        history.extend(self.memory.load_recent(self.max_conversation_turns * 2))
+        return history
 
     def _remember(self, role: str, content: str) -> None:
         if self.memory is not None:
@@ -310,25 +327,10 @@ class VoicePipelineOrchestrator:
         )
 
     async def _enqueue_ack_tone(self) -> None:
-        duration = max(0.02, self.ack_tone_ms / 1000.0)
         sr = self.player.sample_rate
-        samples = int(sr * duration)
-
-        if samples <= 0:
+        pcm16 = make_ack_tone(sr, self.ack_tone_ms)
+        if not pcm16:
             return
-
-        t = np.arange(samples, dtype=np.float32) / float(sr)
-        tone = 0.08 * np.sin(2.0 * np.pi * 880.0 * t)
-
-        pcm16 = (
-            np.clip(
-                tone * 32767.0,
-                -32768.0,
-                32767.0,
-            )
-            .astype(np.int16)
-            .tobytes()
-        )
 
         if self.bench.current.first_audio_ts is None:
             self.bench.mark("first_audio_ts")

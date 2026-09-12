@@ -32,15 +32,21 @@ DEFAULT_FRAME_MS = 100
 class ClientResult:
     def __init__(self) -> None:
         self.request_start: float = 0.0
+        self.first_response_ts: float | None = None
+        self.first_content_ts: float | None = None
         self.first_audio_ts: float | None = None
         self.last_audio_ts: float | None = None
+        self.ack_responses: int = 0
         self.audio_responses: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "request_start": self.request_start,
+            "first_response_ts": self.first_response_ts,
+            "first_content_ts": self.first_content_ts,
             "first_audio_ts": self.first_audio_ts,
             "last_audio_ts": self.last_audio_ts,
+            "ack_responses": self.ack_responses,
             "audio_responses": self.audio_responses,
         }
 
@@ -87,6 +93,12 @@ async def run_client(
             async for resp in call:
                 now = time.monotonic()
                 result.audio_responses += 1
+                if result.first_response_ts is None:
+                    result.first_response_ts = now
+                if resp.debug_text == "[ack]":
+                    result.ack_responses += 1
+                elif result.first_content_ts is None:
+                    result.first_content_ts = now
                 if result.first_audio_ts is None:
                     result.first_audio_ts = now
                 result.last_audio_ts = now
@@ -132,14 +144,19 @@ async def run_benchmark(
             client_results.append(r)
 
     first_latencies = []
+    first_content_latencies = []
     last_latencies = []
     total_audio = 0
+    total_acks = 0
     durations = []
 
     for cr in client_results:
         total_audio += cr.audio_responses
+        total_acks += cr.ack_responses
         if cr.first_audio_ts is not None:
             first_latencies.append((cr.first_audio_ts - cr.request_start) * 1000.0)
+        if cr.first_content_ts is not None:
+            first_content_latencies.append((cr.first_content_ts - cr.request_start) * 1000.0)
         if cr.last_audio_ts is not None:
             last_latencies.append((cr.last_audio_ts - cr.request_start) * 1000.0)
         # approximate client duration
@@ -147,6 +164,7 @@ async def run_benchmark(
             durations.append(cr.last_audio_ts - cr.request_start)
 
     first_q = quantiles(first_latencies)
+    content_q = quantiles(first_content_latencies)
     last_q = quantiles(last_latencies)
 
     total_time = sum(durations) if durations else 0.0
@@ -156,7 +174,9 @@ async def run_benchmark(
         "concurrency": concurrency,
         "clients_reported": len(client_results),
         "first_audio_ms": first_q,
+        "first_content_audio_ms": content_q,
         "last_audio_ms": last_q,
+        "ack_responses": total_acks,
         "total_audio_responses": total_audio,
         "throughput_responses_per_sec": throughput,
     }
