@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from pathlib import Path
 
 from voice_assistant.config import Settings
 from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
@@ -10,10 +11,15 @@ from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Real-time streaming voice assistant")
-    p.add_argument("--mode", choices=["local", "server", "client"], default="local")
+    p.add_argument("--mode", choices=["local", "server", "client", "doctor", "models"], default="local")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=50051)
     p.add_argument("--target", default="localhost:50051")
+    p.add_argument("--skip-audio-check", action="store_true")
+    p.add_argument("--models-dir", default="models")
+    p.add_argument("--download", action="store_true")
+    p.add_argument("--write-env", action="store_true")
+    p.add_argument("--env-file", default=".env")
     return p.parse_args()
 
 
@@ -27,6 +33,8 @@ async def run_local(settings: Settings) -> None:
     from voice_assistant.tts.queue import AudioChunkQueue
     from voice_assistant.tts.stream import PiperConfig, PiperStreamingTTS
     from voice_assistant.nlu import SimpleIntentClassifier
+    from voice_assistant.actions import BasicIntentActions
+    from voice_assistant.memory import SessionMemory
 
     bench = BenchmarkTracker()
     vad = VoiceActivityDetector(
@@ -68,6 +76,11 @@ async def run_local(settings: Settings) -> None:
         sample_rate=settings.tts_sample_rate,
         blocksize=settings.player_blocksize,
     )
+    memory = (
+        SessionMemory(Path(settings.conversation_memory_path).expanduser())
+        if settings.conversation_memory_path
+        else None
+    )
 
     orchestrator = VoicePipelineOrchestrator(
         asr=asr,
@@ -75,9 +88,13 @@ async def run_local(settings: Settings) -> None:
         tts=tts,
         player=player,
         nlu=SimpleIntentClassifier(),
+        action_handler=BasicIntentActions(),
+        memory=memory,
+        system_prompt=settings.assistant_system_prompt,
         bench=bench,
         tts_sentence_max_tokens=settings.sentence_max_tokens,
         tts_eager_min_words=settings.tts_eager_min_words,
+        ack_tone_ms=settings.ack_tone_ms if settings.enable_ack_tone else 0,
         max_conversation_turns=settings.conversation_history_turns,
     )
     await orchestrator.run()
@@ -92,6 +109,35 @@ async def amain() -> None:
     init_telemetry()
     args = parse_args()
     settings = Settings()
+
+    if args.mode == "doctor":
+        from voice_assistant.doctor import format_doctor_report, has_failures, run_doctor
+
+        checks = run_doctor(settings, check_audio=not args.skip_audio_check)
+        print(format_doctor_report(checks))
+        if has_failures(checks):
+            raise SystemExit(1)
+        return
+
+    if args.mode == "models":
+        from voice_assistant.model_setup import (
+            download_recommended_models,
+            format_model_plan,
+            write_env_file,
+        )
+
+        models_dir = Path(args.models_dir)
+        print(format_model_plan(models_dir))
+
+        if args.write_env:
+            wrote = write_env_file(Path(args.env_file), models_dir)
+            status = "wrote" if wrote else "kept existing"
+            print(f"{status}: {args.env_file}")
+
+        if args.download:
+            for message in download_recommended_models(models_dir):
+                print(message)
+        return
 
     if args.mode in {"local", "server"}:
         settings.validate()

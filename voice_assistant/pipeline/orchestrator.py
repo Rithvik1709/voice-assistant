@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import numpy as np
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from voice_assistant.asr.stream import ASREvent, StreamingASR
 
 from voice_assistant.benchmark import BenchmarkTracker
+from voice_assistant.actions import ActionHandler
+from voice_assistant.audio import make_ack_tone
 from voice_assistant.llm.client import StreamingLLMClient
+from voice_assistant.memory import SessionMemory
 from typing import Optional, Any
 from voice_assistant.tts.player import AudioPlayer
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue, safe_put
@@ -38,6 +40,9 @@ class VoicePipelineOrchestrator:
         tts_eager_min_words: int = 3,
         ack_tone_ms: int = 55,
         max_conversation_turns: int = 10,
+        action_handler: Optional[ActionHandler] = None,
+        memory: Optional[SessionMemory] = None,
+        system_prompt: str = "",
     ) -> None:
         self.asr = asr
         self.llm = llm
@@ -55,9 +60,12 @@ class VoicePipelineOrchestrator:
         self.audio_queue: AudioChunkQueue = tts.playback_queue
         self.interrupt_event = asyncio.Event()
         self.nlu = nlu
+        self.action_handler = action_handler
+        self.memory = memory
+        self.system_prompt = system_prompt.strip()
 
-        self.conversation_history: list[dict[str, str]] = []
         self.max_conversation_turns = max(1, max_conversation_turns)
+        self.conversation_history = self._load_conversation_history()
 
     async def asr_task(self) -> None:
         async for event in self.asr.stream_events():
@@ -90,6 +98,7 @@ class VoicePipelineOrchestrator:
                 span.set_attribute("prompt.length", len(prompt))
 
                 # run lightweight NLU (if provided) to tag the prompt with intent
+                intent: dict[str, object] | None = None
                 try:
                     if self.nlu is not None:
                         intent = self.nlu.classify(prompt)
@@ -114,7 +123,22 @@ class VoicePipelineOrchestrator:
                 self.conversation_history.append(
                     {"role": "user", "content": prompt}
                 )
+                self._remember("user", prompt)
                 self._prune_conversation_history()
+
+                if intent is not None and self.action_handler is not None:
+                    action_result = self.action_handler.handle(prompt, intent)
+                    if action_result.handled:
+                        response = action_result.response.strip()
+                        if response:
+                            await self._emit_text_response(response)
+                            self.conversation_history.append(
+                                {"role": "assistant", "content": response}
+                            )
+                            self._remember("assistant", response)
+                            self._prune_conversation_history()
+                        await self.token_queue.put("<eos>")
+                        continue
 
                 assistant_reply = await self.llm.stream_tokens(
                     self.conversation_history,
@@ -124,6 +148,7 @@ class VoicePipelineOrchestrator:
                 self.conversation_history.append(
                     {"role": "assistant", "content": assistant_reply}
                 )
+                self._remember("assistant", assistant_reply)
                 self._prune_conversation_history()
 
                 await self.token_queue.put("<eos>")
@@ -224,9 +249,39 @@ class VoicePipelineOrchestrator:
 
     def _prune_conversation_history(self) -> None:
         max_messages = self.max_conversation_turns * 2
+        system_messages = [
+            item for item in self.conversation_history
+            if item.get("role") == "system"
+        ]
+        chat_messages = [
+            item for item in self.conversation_history
+            if item.get("role") != "system"
+        ]
 
-        if len(self.conversation_history) > max_messages:
-            self.conversation_history = self.conversation_history[-max_messages:]
+        if len(chat_messages) > max_messages:
+            chat_messages = chat_messages[-max_messages:]
+
+        self.conversation_history = system_messages[:1] + chat_messages
+
+    def _load_conversation_history(self) -> list[dict[str, str]]:
+        history = []
+        if self.system_prompt:
+            history.append({"role": "system", "content": self.system_prompt})
+
+        if self.memory is None:
+            return history
+
+        history.extend(self.memory.load_recent(self.max_conversation_turns * 2))
+        return history
+
+    def _remember(self, role: str, content: str) -> None:
+        if self.memory is not None:
+            self.memory.append(role, content)
+
+    async def _emit_text_response(self, response: str) -> None:
+        for token in response.split(" "):
+            await self.token_queue.put(token)
+            await self.token_queue.put(" ")
 
     async def _synthesize_with_retry(
         self,
@@ -272,25 +327,10 @@ class VoicePipelineOrchestrator:
         )
 
     async def _enqueue_ack_tone(self) -> None:
-        duration = max(0.02, self.ack_tone_ms / 1000.0)
         sr = self.player.sample_rate
-        samples = int(sr * duration)
-
-        if samples <= 0:
+        pcm16 = make_ack_tone(sr, self.ack_tone_ms)
+        if not pcm16:
             return
-
-        t = np.arange(samples, dtype=np.float32) / float(sr)
-        tone = 0.08 * np.sin(2.0 * np.pi * 880.0 * t)
-
-        pcm16 = (
-            np.clip(
-                tone * 32767.0,
-                -32768.0,
-                32767.0,
-            )
-            .astype(np.int16)
-            .tobytes()
-        )
 
         if self.bench.current.first_audio_ts is None:
             self.bench.mark("first_audio_ts")

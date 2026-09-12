@@ -11,6 +11,7 @@ from typing import Any
 import grpc
 
 from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
+from voice_assistant.audio import make_ack_tone
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.config import Settings
 from voice_assistant.llm.client import LLMConfig, StreamingLLMClient
@@ -140,6 +141,13 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
         bench = BenchmarkTracker()
         speech_buffer = bytearray()
         conversation_history: list[dict[str, str]] = []
+        if self.settings.assistant_system_prompt.strip():
+            conversation_history.append(
+                {
+                    "role": "system",
+                    "content": self.settings.assistant_system_prompt.strip(),
+                }
+            )
         
         # Mock mode uses energy VAD (no binary dependency). Production uses webrtc VAD (more accurate).
         vad_mode = "energy" if os.getenv("MOCK_MODELS") == "1" else "webrtc"
@@ -262,6 +270,22 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                         # Cancel any active response first (though we likely already did when speech started)
                         await cancel_active_response(await_cleanup=False)
 
+                        if self.settings.enable_ack_tone:
+                            ack_pcm = make_ack_tone(
+                                self.settings.tts_sample_rate,
+                                self.settings.ack_tone_ms,
+                            )
+                        else:
+                            ack_pcm = b""
+
+                        if ack_pcm:
+                            await response_queue.put(pb2.AudioResponse(
+                                pcm16=ack_pcm,
+                                sample_rate=self.settings.tts_sample_rate,
+                                timestamp_ms=int(time.time() * 1000),
+                                debug_text="[ack]",
+                            ))
+
                         # Run LLM streaming in a background task and append "<eos>" at the end
                         async def run_llm():
                             try:
@@ -278,10 +302,17 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                                         "content": assistant_reply,
                                     }
                                 )
-                                max_messages = (
-                                    self.settings.conversation_history_turns * 2
-                                )
-                                del conversation_history[:-max_messages]
+                                max_messages = self.settings.conversation_history_turns * 2
+                                system_messages = [
+                                    item for item in conversation_history
+                                    if item.get("role") == "system"
+                                ]
+                                chat_messages = [
+                                    item for item in conversation_history
+                                    if item.get("role") != "system"
+                                ]
+                                del chat_messages[:-max_messages]
+                                conversation_history[:] = system_messages[:1] + chat_messages
                             except asyncio.CancelledError:
                                 raise
                             except Exception as e:
@@ -409,4 +440,7 @@ async def serve(host: str, port: int, settings: Settings) -> None:
     server.add_insecure_port(f"{host}:{port}")
     await server.start()
     logger.info("gRPC server listening on %s:%s", host, port)
-    await server.wait_for_termination()
+    try:
+        await server.wait_for_termination()
+    finally:
+        await server.stop(grace=2)

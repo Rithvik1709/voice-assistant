@@ -1,5 +1,29 @@
 # Changelog
 
+## Vaani 1.1.0 - Unreleased
+
+### Added
+
+- Setup doctor mode for checking model paths, Piper, gRPC port availability, and audio input.
+- Open-model bootstrap mode for previewing/downloading the starter model set and writing local env files.
+- Basic intent action hooks for deterministic responses before LLM fallback.
+- Optional JSONL session memory through `CONVERSATION_MEMORY_PATH`.
+- Shared acknowledgement tone generation for local and gRPC response paths.
+- Low-latency profile controls through `VAANI_PROFILE=low_latency`.
+
+### Changed
+
+- gRPC streams now emit immediate acknowledgement audio before full assistant content.
+- Benchmark output now separates first audible response from first content audio.
+- Settings now read environment values when `Settings()` is created, making tests and `.env` changes more reliable.
+- gRPC server shutdown now stops the async server gracefully.
+
+### Verified
+
+- `pytest -q`
+- `python -m compileall -q voice_assistant tests`
+- `MOCK_MODELS=1` gRPC load benchmark at 10 concurrent streams
+
 ## Vaani 1.0.0 - 2026-08-16
 
 First stable open-source release baseline for Vaani.

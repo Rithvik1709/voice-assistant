@@ -31,6 +31,7 @@ Audio playback
 - Speculative decoding support and KV-cache compatibility hooks
 - Sentence-chunked Piper TTS synthesis with non-blocking playback
 - Barge-in interruption handling for live assistant interaction
+- Intent action hooks for deterministic commands before LLM fallback
 - gRPC server/client mode for remote deployment
 - Benchmark metrics for ASR latency, TTFT, TTS first-chunk latency, end-to-end latency, and RTF
 - Production-oriented configuration validation for model paths and runtime dependencies
@@ -83,25 +84,56 @@ pip install -e .[cuda]
 pip install -e .[metal]
 ```
 
+### Get open models
+
+Vaani is designed to run with downloadable open models. The recommended starter set uses Qwen2.5 0.5B Instruct GGUF for the LLM, Piper lessac medium for TTS, and Vosk small English US for ASR.
+
+Preview the model set:
+
+```bash
+python -m voice_assistant.main --mode models
+```
+
+Write a local `.env` from the open-model defaults:
+
+```bash
+python -m voice_assistant.main --mode models --write-env
+```
+
+Download the recommended models into `models/`:
+
+```bash
+python -m voice_assistant.main --mode models --download
+```
+
 ### Run locally
 
 ```bash
 python -m voice_assistant.main --mode local
 ```
 
+### Check setup
+
+```bash
+python -m voice_assistant.main --mode doctor
+```
+
 ## Model Setup
 
-To run Vaani locally, place the required model assets inside a `models/` directory and configure them in your environment.
+To run Vaani locally, place the required model assets inside a `models/` directory and configure them in your environment. The `models` command above can fetch a small open starter set for local development.
 
 ### 1. LLM model
 
 Vaani uses `llama-cpp-python` and expects a GGUF model.
 
-Recommended choices:
-- Llama-3-8B-Instruct
-- Mistral-7B-Instruct
+Recommended open starter:
+- Qwen2.5-0.5B-Instruct-GGUF Q4_K_M
 
-Preferred quantization:
+Larger compatible choices:
+- Llama-3-8B-Instruct GGUF
+- Mistral-7B-Instruct GGUF
+
+Preferred quantizations:
 - Q4_K_M
 - Q5_K_M
 
@@ -134,22 +166,37 @@ Recommended model:
 
 Download from the official Vosk model repository and extract it into `models/`.
 
+### Model licenses
+
+The default starter set uses redistributable open model assets:
+
+- Qwen2.5-0.5B-Instruct-GGUF: Apache-2.0
+- Piper voices: MIT
+- Vosk small English US: Apache-2.0
+
+Always check the license of any replacement model before publishing a packaged release.
+
 ## Environment Configuration
 
 Create a `.env` file with paths similar to the following:
 
 ```env
-MODEL_PATH="models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
+MODEL_PATH="models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
 PIPER_VOICE="models/en_US-lessac-medium.onnx"
 ASR_MODEL_PATH="models/vosk-model-small-en-us-0.15"
 ASR_BACKEND="vosk"
 VAD_AGGRESSIVENESS=2
 CHUNK_MS=20
 ASR_ENDPOINT_SILENCE_MS=60
+ACK_TONE_MS=55
+ENABLE_ACK_TONE=1
+VAANI_PROFILE="low_latency"
+ASSISTANT_SYSTEM_PROMPT="You are Vaani, a concise voice assistant. Answer clearly in one or two short sentences unless the user asks for detail."
 TTS_SENTENCE_MAX_TOKENS=8
 TTS_EAGER_MIN_WORDS=3
 PLAYER_BLOCKSIZE=128
 GRPC_PORT=50051
+CONVERSATION_MEMORY_PATH="data/session.jsonl"
 ```
 
 ## gRPC Mode

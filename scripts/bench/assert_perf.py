@@ -22,6 +22,8 @@ def main() -> None:
         summary = res.get("summary", {})
         first_audio_ms = summary.get("first_audio_ms", {})
         p95_first = first_audio_ms.get("p95", 0.0)
+        content_audio_ms = summary.get("first_content_audio_ms", {})
+        p95_content = content_audio_ms.get("p95", 0.0)
         throughput = summary.get("throughput_responses_per_sec", 0.0)
         
         net_p95_processing = max(0.0, p95_first - args.active_streaming_time)
@@ -29,6 +31,8 @@ def main() -> None:
         print("=== PERFORMANCE METRICS ===")
         print(f"Throughput: {throughput:.2f} resp/sec")
         print(f"Raw p95 First Audio Latency: {p95_first:.2f}ms")
+        if p95_content:
+            print(f"Raw p95 First Content Audio Latency: {p95_content:.2f}ms")
         print(f"Net p95 ASR/TTS Processing Latency: {net_p95_processing:.2f}ms (Budget: {args.budget:.2f}ms)")
         print("=============================")
         
