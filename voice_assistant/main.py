@@ -10,10 +10,11 @@ from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Real-time streaming voice assistant")
-    p.add_argument("--mode", choices=["local", "server", "client"], default="local")
+    p.add_argument("--mode", choices=["local", "server", "client", "doctor"], default="local")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=50051)
     p.add_argument("--target", default="localhost:50051")
+    p.add_argument("--skip-audio-check", action="store_true")
     return p.parse_args()
 
 
@@ -92,6 +93,15 @@ async def amain() -> None:
     init_telemetry()
     args = parse_args()
     settings = Settings()
+
+    if args.mode == "doctor":
+        from voice_assistant.doctor import format_doctor_report, has_failures, run_doctor
+
+        checks = run_doctor(settings, check_audio=not args.skip_audio_check)
+        print(format_doctor_report(checks))
+        if has_failures(checks):
+            raise SystemExit(1)
+        return
 
     if args.mode in {"local", "server"}:
         settings.validate()

@@ -89,6 +89,12 @@ pip install -e .[metal]
 python -m voice_assistant.main --mode local
 ```
 
+### Check setup
+
+```bash
+python -m voice_assistant.main --mode doctor
+```
+
 ## Model Setup
 
 To run Vaani locally, place the required model assets inside a `models/` directory and configure them in your environment.
