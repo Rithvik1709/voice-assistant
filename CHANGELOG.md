@@ -1,5 +1,17 @@
 # Changelog
 
+## Vaani 1.1.0 - Unreleased
+
+### Added
+
+- Setup doctor mode for checking model paths, Piper, gRPC port availability, and audio input.
+- Basic intent action hooks for deterministic responses before LLM fallback.
+- Optional JSONL session memory through `CONVERSATION_MEMORY_PATH`.
+
+### Verified
+
+- `pytest -q`
+
 ## Vaani 1.0.0 - 2026-08-16
 
 First stable open-source release baseline for Vaani.
