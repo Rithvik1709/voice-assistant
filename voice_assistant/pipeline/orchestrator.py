@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.actions import ActionHandler
 from voice_assistant.llm.client import StreamingLLMClient
+from voice_assistant.memory import SessionMemory
 from typing import Optional, Any
 from voice_assistant.tts.player import AudioPlayer
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue, safe_put
@@ -40,6 +41,7 @@ class VoicePipelineOrchestrator:
         ack_tone_ms: int = 55,
         max_conversation_turns: int = 10,
         action_handler: Optional[ActionHandler] = None,
+        memory: Optional[SessionMemory] = None,
     ) -> None:
         self.asr = asr
         self.llm = llm
@@ -58,9 +60,10 @@ class VoicePipelineOrchestrator:
         self.interrupt_event = asyncio.Event()
         self.nlu = nlu
         self.action_handler = action_handler
+        self.memory = memory
 
-        self.conversation_history: list[dict[str, str]] = []
         self.max_conversation_turns = max(1, max_conversation_turns)
+        self.conversation_history = self._load_conversation_history()
 
     async def asr_task(self) -> None:
         async for event in self.asr.stream_events():
@@ -118,6 +121,7 @@ class VoicePipelineOrchestrator:
                 self.conversation_history.append(
                     {"role": "user", "content": prompt}
                 )
+                self._remember("user", prompt)
                 self._prune_conversation_history()
 
                 if intent is not None and self.action_handler is not None:
@@ -129,6 +133,7 @@ class VoicePipelineOrchestrator:
                             self.conversation_history.append(
                                 {"role": "assistant", "content": response}
                             )
+                            self._remember("assistant", response)
                             self._prune_conversation_history()
                         await self.token_queue.put("<eos>")
                         continue
@@ -141,6 +146,7 @@ class VoicePipelineOrchestrator:
                 self.conversation_history.append(
                     {"role": "assistant", "content": assistant_reply}
                 )
+                self._remember("assistant", assistant_reply)
                 self._prune_conversation_history()
 
                 await self.token_queue.put("<eos>")
@@ -244,6 +250,16 @@ class VoicePipelineOrchestrator:
 
         if len(self.conversation_history) > max_messages:
             self.conversation_history = self.conversation_history[-max_messages:]
+
+    def _load_conversation_history(self) -> list[dict[str, str]]:
+        if self.memory is None:
+            return []
+
+        return self.memory.load_recent(self.max_conversation_turns * 2)
+
+    def _remember(self, role: str, content: str) -> None:
+        if self.memory is not None:
+            self.memory.append(role, content)
 
     async def _emit_text_response(self, response: str) -> None:
         for token in response.split(" "):

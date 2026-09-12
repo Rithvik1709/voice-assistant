@@ -41,6 +41,7 @@ class Settings:
     conversation_history_turns: int = int(
         os.getenv("CONVERSATION_HISTORY_TURNS", "10")
     )
+    conversation_memory_path: str = os.getenv("CONVERSATION_MEMORY_PATH", "")
 
     tts_sample_rate: int = 22_050
     sentence_max_tokens: int = int(os.getenv("TTS_SENTENCE_MAX_TOKENS", "8"))

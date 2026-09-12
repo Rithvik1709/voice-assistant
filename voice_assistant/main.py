@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from pathlib import Path
 
 from voice_assistant.config import Settings
 from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
@@ -29,6 +30,7 @@ async def run_local(settings: Settings) -> None:
     from voice_assistant.tts.stream import PiperConfig, PiperStreamingTTS
     from voice_assistant.nlu import SimpleIntentClassifier
     from voice_assistant.actions import BasicIntentActions
+    from voice_assistant.memory import SessionMemory
 
     bench = BenchmarkTracker()
     vad = VoiceActivityDetector(
@@ -70,6 +72,11 @@ async def run_local(settings: Settings) -> None:
         sample_rate=settings.tts_sample_rate,
         blocksize=settings.player_blocksize,
     )
+    memory = (
+        SessionMemory(Path(settings.conversation_memory_path).expanduser())
+        if settings.conversation_memory_path
+        else None
+    )
 
     orchestrator = VoicePipelineOrchestrator(
         asr=asr,
@@ -78,6 +85,7 @@ async def run_local(settings: Settings) -> None:
         player=player,
         nlu=SimpleIntentClassifier(),
         action_handler=BasicIntentActions(),
+        memory=memory,
         bench=bench,
         tts_sentence_max_tokens=settings.sentence_max_tokens,
         tts_eager_min_words=settings.tts_eager_min_words,
