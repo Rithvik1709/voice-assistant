@@ -104,6 +104,27 @@ def _piper_smoke_check(voice: str) -> DoctorCheck | None:
     return DoctorCheck("piper_synthesis", False, err[-1] if err else f"no audio produced (exit {proc.returncode})")
 
 
+def _llm_server_check(settings: Settings) -> DoctorCheck:
+    """Ask an OpenAI-compatible server for its model list."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = settings.llm_base_url.rstrip("/") + "/models"
+    headers = {"Authorization": f"Bearer {settings.llm_api_key}"} if settings.llm_api_key else {}
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        return DoctorCheck("llm_server", False, f"{url} returned HTTP {exc.code}")
+    except (OSError, ValueError) as exc:
+        return DoctorCheck("llm_server", False, f"cannot reach {url}: {exc}")
+    models = [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
+    if models and settings.llm_model not in models:
+        return DoctorCheck("llm_server", False, f"model {settings.llm_model!r} not served; available: {', '.join(models[:8])}")
+    return DoctorCheck("llm_server", True, f"{settings.llm_base_url} serving {settings.llm_model}")
+
+
 def _config_check(settings: Settings) -> DoctorCheck:
     problems = settings.check_ranges()
     if problems:
@@ -121,11 +142,22 @@ def run_doctor(settings: Settings, check_audio: bool = True) -> list[DoctorCheck
     local_hint = "pip install 'voice-assistant[local]'"
     checks = [
         _config_check(settings),
-        _module_check("llm_runtime", "llama_cpp", local_hint),
-        _module_check("asr_runtime", "vosk", local_hint, settings.asr_backend == "vosk"),
+        *(
+            [_llm_server_check(settings)]
+            if settings.llm_backend == "openai"
+            else [_module_check("llm_runtime", "llama_cpp", local_hint), _path_check("llm_model", settings.model_path)]
+        ),
+        (
+            _module_check("asr_runtime", "faster_whisper", "pip install 'voice-assistant[whisper]'")
+            if settings.asr_backend == "whisper"
+            else _module_check("asr_runtime", "vosk", local_hint, settings.asr_backend == "vosk")
+        ),
         _piper_check(),
-        _path_check("llm_model", settings.model_path),
-        _path_check("asr_model", settings.asr_model_path, settings.asr_backend in {"vosk", "whispercpp"}),
+        (
+            DoctorCheck("asr_model", True, f"whisper {settings.asr_model_path or 'base.en'}")
+            if settings.asr_backend == "whisper" and not Path(settings.asr_model_path).expanduser().exists()
+            else _path_check("asr_model", settings.asr_model_path, settings.asr_backend in {"vosk", "whispercpp"})
+        ),
         _path_check("piper_voice", settings.piper_voice),
         _path_check("piper_config", f"{settings.piper_voice}.json" if settings.piper_voice else ""),
         _port_check(settings.grpc_port),

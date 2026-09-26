@@ -39,7 +39,8 @@ async def run_local(settings: Settings) -> None:
     from voice_assistant.asr.stream import StreamingASR
     from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
     from voice_assistant.benchmark import BenchmarkTracker
-    from voice_assistant.llm.client import LLMConfig, StreamingLLMClient, warm_up_llm
+    from voice_assistant.llm import create_llm
+    from voice_assistant.llm.client import warm_up_llm
     from voice_assistant.memory import SessionMemory
     from voice_assistant.nlu import SimpleIntentClassifier
     from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
@@ -65,18 +66,11 @@ async def run_local(settings: Settings) -> None:
         backend=settings.asr_backend,
         endpoint_silence_ms=settings.asr_endpoint_silence_ms,
         speech_start_frames=settings.barge_in_frames,
+        hold_silence_ms=settings.asr_hold_silence_ms,
+        language=settings.asr_language,
     )
 
-    llm = StreamingLLMClient(
-        LLMConfig(
-            model_path=settings.model_path,
-            n_ctx=settings.llm_context_size,
-            n_gpu_layers=settings.n_gpu_layers,
-            max_tokens=settings.llm_max_tokens,
-            temperature=settings.llm_temperature,
-        ),
-        bench=bench,
-    )
+    llm = create_llm(settings, bench=bench)
 
     queue = AudioChunkQueue(maxsize=settings.tts_queue_maxsize)
     tts = PiperStreamingTTS(

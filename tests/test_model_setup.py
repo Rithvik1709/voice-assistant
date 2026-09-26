@@ -8,7 +8,8 @@ def test_env_template_uses_local_open_model_paths() -> None:
 
     assert 'MODEL_PATH="models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"' in text
     assert 'PIPER_VOICE="models/en_US-lessac-medium.onnx"' in text
-    assert 'ASR_MODEL_PATH="models/vosk-model-small-en-us-0.15"' in text
+    assert 'ASR_MODEL_PATH="models/whisper-base.en"' in text
+    assert 'ASR_BACKEND="whisper"' in text
     assert 'CONVERSATION_MEMORY_PATH="data/session.jsonl"' in text
 
 

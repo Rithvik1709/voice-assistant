@@ -159,3 +159,88 @@ def test_vosk_segments_from_internal_endpoints_are_not_lost() -> None:
     assert rec.partial_result()[0] == "turn on in progress"
     assert rec.final_result(b"")[0] == "turn on the lights"
     assert rec._segments == []
+
+
+class ScriptedPartials(FakeRecognizer):
+    def __init__(self, partial: str) -> None:
+        super().__init__()
+        self.partial = partial
+
+    def partial_result(self) -> tuple[str, float]:
+        return self.partial, 0.5
+
+
+def _frames_until_final(partial: str, endpoint_ms: int = 100, hold_ms: int = 400) -> int:
+    rec = ScriptedPartials(partial)
+    vad = VoiceActivityDetector(VADConfig(sample_rate=16_000, frame_ms=FRAME_MS, mode="energy"))
+    asr = StreamingASR(
+        sample_rate=16_000, chunk_size=SAMPLES, vad=vad, model_path="",
+        endpoint_silence_ms=endpoint_ms, hold_silence_ms=hold_ms, recognizer=rec,
+    )
+    feed(asr, [SPEECH] * 5)
+    for n in range(1, 100):
+        if any(e.type == "final" for e in asr.process_frame(SILENCE)):
+            return n
+    raise AssertionError("no final")
+
+
+def test_complete_phrase_uses_normal_endpoint() -> None:
+    assert _frames_until_final("what time is it") * FRAME_MS == 120
+
+
+def test_dangling_word_holds_the_turn_longer() -> None:
+    assert _frames_until_final("turn on the") * FRAME_MS == 420
+    assert _frames_until_final("mujhe batao ki") * FRAME_MS == 420
+
+
+def test_looks_unfinished() -> None:
+    from voice_assistant.asr.stream import looks_unfinished
+
+    assert looks_unfinished("I want to go to")
+    assert looks_unfinished("um")
+    assert not looks_unfinished("what is the weather in paris")
+    assert not looks_unfinished("")
+
+
+class FakeSegment:
+    def __init__(self, text: str, no_speech_prob: float = 0.01, avg_logprob: float = -0.1) -> None:
+        self.text = text
+        self.no_speech_prob = no_speech_prob
+        self.avg_logprob = avg_logprob
+
+
+class FakeWhisperModel:
+    def __init__(self, segments: list[FakeSegment]) -> None:
+        self.segments = segments
+        self.calls: list[dict] = []
+
+    def transcribe(self, audio, **kwargs):
+        self.calls.append({"samples": len(audio), **kwargs})
+        return iter(self.segments), None
+
+
+def test_whisper_recognizer_drops_hallucinated_silence() -> None:
+    from voice_assistant.asr.stream import load_recognizer
+
+    model = FakeWhisperModel([FakeSegment(" Turn on the lights."), FakeSegment(" Thank you.", no_speech_prob=0.9)])
+    rec = load_recognizer("whisper", "base.en", 16_000, language="en", shared=model)
+
+    text, confidence = rec.final_result(SPEECH * 10)
+
+    assert text == "Turn on the lights."
+    assert 0.8 < confidence <= 1.0
+    call = model.calls[0]
+    assert call["samples"] == SAMPLES * 10
+    assert call["language"] == "en"
+    assert call["vad_filter"] is False
+    assert rec.final_result(b"") == ("", 0.0)
+    assert rec.streaming is False
+
+
+def test_unknown_asr_backend_is_rejected() -> None:
+    import pytest
+
+    from voice_assistant.asr.stream import load_recognizer
+
+    with pytest.raises(ValueError, match="Unsupported ASR backend"):
+        load_recognizer("nope", "", 16_000)
