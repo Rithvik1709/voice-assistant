@@ -1,6 +1,6 @@
 # Voice Assistant Benchmark Results
 
-Date: 2026-09-26 (Vaani 1.1.0)
+Date: 2026-09-26 (Vaani 2.0.0)
 
 Benchmark command used:
 
@@ -34,7 +34,7 @@ The clients stream 30 frames at 30 ms each, so roughly 900 ms of each raw latenc
 
 This run shows the mock streaming pipeline producing audible acknowledgement about 65 ms after end-of-speech at p95 under a 10-client load, and first content audio about 113 ms after end-of-speech at p95 (down from 70 ms and 122 ms in the 2026-09-12 run).
 
-The 1.1.0 server encodes audio with real protobuf instead of JSON + base64, feeds audio to the recognizer frame by frame instead of decoding the whole utterance at the end, and runs LLM generation off the event loop.
+The 2.0.0 server encodes audio with real protobuf instead of JSON + base64, feeds audio to the recognizer frame by frame instead of decoding the whole utterance at the end, and runs LLM generation off the event loop.
 
 At 50 concurrent clients (`--concurrency 50 --frames-per-client 2`, the CI configuration) the same comparison measured first-audio p95 of 215.6 ms versus 236.8 ms before, and first-content p95 of 262.8 ms versus 293.8 ms.
 

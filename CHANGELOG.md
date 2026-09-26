@@ -1,6 +1,14 @@
 # Changelog
 
-## Vaani 1.1.0 - Unreleased
+## Vaani 2.0.0 - 2026-09-26
+
+### Upgrading from 1.0
+
+- **Install:** the model runtimes are now an extra. Use `pip install -e ".[local]"` for voice mode; a plain `pip install -e .` gives the core only (mock mode, gRPC server, benchmarks).
+- **gRPC clients:** messages are now real protobuf, as defined in `voice_assistant.proto`. Clients built against the 1.0 JSON stubs must regenerate their stubs. `AudioResponse` gained `interrupt` and `transcript`; clients should drop buffered audio on `interrupt`.
+- **Speech recognition:** Whisper is the default. To keep Vosk, set `ASR_BACKEND=vosk` and point `ASR_MODEL_PATH` at the Vosk model folder. Run `vaani models --download` to fetch Whisper `base.en`.
+- **Endpointing:** `ASR_ENDPOINT_SILENCE_MS` now defaults to 400 (was 60). An explicit 60 in an old `.env` will still split sentences at natural pauses; remove it or raise it.
+- **Tracing:** spans are no longer printed by default. Set `OTEL_EXPORTER_OTLP_ENDPOINT`, or `VAANI_TRACE_CONSOLE=1`, and install the `[otel]` extra.
 
 ### Fixed
 

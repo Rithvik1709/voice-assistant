@@ -11,7 +11,7 @@ It can also run as a gRPC server for remote clients, or as a text chat when you 
 - **Speaks like a person, not a screen:** markdown, lists, code, links, and emoji are never read aloud.
 - **English and Hinglish:** the intent layer understands requests like "gaana chala do" and "delhi ka mausam batao".
 
-See [CHANGELOG.md](CHANGELOG.md) for what changed in 1.1.0.
+See [CHANGELOG.md](CHANGELOG.md) for what changed in 2.0.0, including how to upgrade from 1.0.
 
 ## Contents
 
