@@ -171,23 +171,11 @@ def build_chat(
 
 
 async def run_chat(settings: Settings, speak: bool = False) -> None:
-    from voice_assistant.llm.client import LLMConfig, StreamingLLMClient, warm_up_llm
+    from voice_assistant.llm import create_llm
+    from voice_assistant.llm.client import warm_up_llm
 
-    if mock_models_enabled():
-        from voice_assistant.mocks import MockLLMClient
-
-        llm = MockLLMClient()
-    else:
-        llm = StreamingLLMClient(
-            LLMConfig(
-                model_path=settings.model_path,
-                n_ctx=settings.llm_context_size,
-                n_gpu_layers=settings.n_gpu_layers,
-                max_tokens=settings.llm_max_tokens,
-                temperature=settings.llm_temperature,
-            )
-        )
-        await warm_up_llm(llm, settings.assistant_system_prompt)
+    llm = create_llm(settings)
+    await warm_up_llm(llm, settings.assistant_system_prompt)
 
     tts = player = None
     if speak and not mock_models_enabled():

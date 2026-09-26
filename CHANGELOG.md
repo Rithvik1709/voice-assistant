@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Speech recognition runs off the event loop in local mode, so a slow decode cannot stall playback.
 - LLM generation no longer blocks the event loop. Tokens are produced in a worker thread, so microphone capture, TTS, and playback keep running while the model generates, and a reply can be cancelled at the next token.
 - Barge-in now works in local mode. It was implemented but never wired up: speaking while the assistant talks cancels generation, drops queued speech, and silences playback.
 - Playback no longer stays silent forever after an interruption (the player latched an `interrupted` flag that was never cleared).
@@ -22,6 +23,9 @@
 
 ### Added
 
+- OpenAI-compatible LLM backend (`LLM_BACKEND=openai`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`) for Ollama, LM Studio, vLLM, llama.cpp server, or hosted models, with streaming, cancellation, warm-up, and a doctor reachability check.
+- faster-whisper speech recognition, now the default (`ASR_BACKEND=whisper`, `ASR_LANGUAGE`), shared across gRPC streams; `vaani models --download` fetches Whisper `base.en` instead of Vosk. Vosk remains available with `ASR_BACKEND=vosk`. On test questions it transcribed 5 of 5 correctly against 2 of 5 for Vosk small, at about 300 ms per utterance on CPU.
+- Smarter endpointing: when the words so far end on a word like "and", "the" or "um", Vaani waits up to `ASR_HOLD_SILENCE_MS` before ending the turn.
 - `vaani chat`: text chat through the full assistant pipeline (actions, LLM, memory), with `--speak` to also hear replies, `/reset` and `/quit` commands, and piped input. Needs only the LLM model, or no models with `MOCK_MODELS=1`.
 - Speech normalization before TTS: markdown emphasis, headings, bullets, code blocks, links, URLs and emoji are removed, and symbols such as `21°C`, `40%`, `&` and `$1,200` are spoken as words. The default system prompt now tells the model its replies are spoken.
 - Live weather answers from Open-Meteo (no API key), opt-in with `ENABLE_WEATHER=1`, with city extraction from English and Hinglish requests, `WEATHER_DEFAULT_CITY`, and `WEATHER_UNITS`.
@@ -59,7 +63,7 @@
 
 ### Verified
 
-- `pytest -q` (100 passed, 1 skipped)
+- `pytest -q` (110 passed, 1 skipped)
 - `ruff check voice_assistant tests scripts`
 - `MOCK_MODELS=1` gRPC load benchmark at 10 and 50 concurrent streams, within the CI performance budget
 

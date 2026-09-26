@@ -9,12 +9,13 @@ from typing import Any
 
 import grpc
 
-from voice_assistant.asr.stream import ASREvent, StreamingASR, _VoskRecognizer
+from voice_assistant.asr.stream import ASREvent, StreamingASR, load_recognizer
 from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
 from voice_assistant.audio import make_ack_tone
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.config import Settings, mock_models_enabled
-from voice_assistant.llm.client import LLMConfig, StreamingLLMClient, warm_up_llm
+from voice_assistant.llm import create_llm
+from voice_assistant.llm.client import warm_up_llm
 from voice_assistant.mocks import MockLLMClient, MockPiperStreamingTTS, MockRecognizer  # noqa: F401 (re-exported)
 from voice_assistant.nlu import SimpleIntentClassifier
 from voice_assistant.tts.queue import AudioChunkQueue
@@ -65,8 +66,12 @@ class _VoiceSession:
                 mode="energy" if mock else "webrtc",
             )
         )
-        recognizer = MockRecognizer() if mock else _VoskRecognizer(
-            self.settings.asr_model_path, self.settings.sample_rate, model=service.vosk_model
+        recognizer = MockRecognizer() if mock else load_recognizer(
+            self.settings.asr_backend,
+            self.settings.asr_model_path,
+            self.settings.sample_rate,
+            language=self.settings.asr_language,
+            shared=service.asr_model,
         )
         self.asr = StreamingASR(
             sample_rate=self.settings.sample_rate,
@@ -75,6 +80,8 @@ class _VoiceSession:
             model_path=self.settings.asr_model_path,
             endpoint_silence_ms=self.settings.asr_endpoint_silence_ms,
             speech_start_frames=self.settings.barge_in_frames,
+            hold_silence_ms=self.settings.asr_hold_silence_ms,
+            language=self.settings.asr_language,
             recognizer=recognizer,
         )
 
@@ -299,26 +306,16 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
         self.settings = settings
         self.nlu = SimpleIntentClassifier()
         self.actions = settings.build_actions()
-        self.vosk_model: Any = None
+        self.asr_model: Any = None
 
         # Check if high-fidelity mock mode is enabled (for regression testing/CI)
         if mock_models_enabled():
             logger.info("Starting gRPC service in HIGH-FIDELITY MOCK MODE (MOCK_MODELS=1)")
             self.llm: Any = MockLLMClient()
         else:
-            if not _VOSK_AVAILABLE:
-                raise RuntimeError("vosk is not installed. Install it with `pip install 'voice-assistant[local]'`.")
-            # One model shared by every stream; each stream gets its own recognizer.
-            self.vosk_model = Model(settings.asr_model_path)
-            self.llm = StreamingLLMClient(
-                LLMConfig(
-                    model_path=settings.model_path,
-                    n_ctx=settings.llm_context_size,
-                    n_gpu_layers=settings.n_gpu_layers,
-                    max_tokens=settings.llm_max_tokens,
-                    temperature=settings.llm_temperature,
-                ),
-            )
+            # One loaded model shared by every stream; each stream gets its own recognizer.
+            self.asr_model = _load_shared_asr_model(settings)
+            self.llm = create_llm(settings)
 
     async def StreamVoice(
         self, request_iterator: AsyncIterator[pb2.AudioChunk], context: grpc.aio.ServicerContext
@@ -351,6 +348,20 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
             read_task.cancel()
             await asyncio.gather(read_task, return_exceptions=True)
             await session.close()
+
+
+def _load_shared_asr_model(settings: Settings) -> Any:
+    if settings.asr_backend == "whisper":
+        try:
+            from faster_whisper import WhisperModel  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("faster-whisper is not installed. Install it with `pip install 'voice-assistant[whisper]'`.") from exc
+        return WhisperModel(settings.asr_model_path or "base.en", device="auto", compute_type="int8")
+    if settings.asr_backend == "vosk":
+        if not _VOSK_AVAILABLE:
+            raise RuntimeError("vosk is not installed. Install it with `pip install 'voice-assistant[local]'`.")
+        return Model(settings.asr_model_path)
+    return None
 
 
 async def serve(host: str, port: int, settings: Settings) -> None:

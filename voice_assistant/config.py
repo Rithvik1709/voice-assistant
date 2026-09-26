@@ -56,6 +56,8 @@ class Settings:
     # Trailing silence that ends an utterance. Natural pauses between words
     # are often 100-250ms, so values much lower than this split sentences.
     asr_endpoint_silence_ms: int = field(default_factory=lambda: _env_int("ASR_ENDPOINT_SILENCE_MS", 400))
+    # Longer silence allowed when the words so far look unfinished ("and ...", "the ...").
+    asr_hold_silence_ms: int = field(default_factory=lambda: _env_int("ASR_HOLD_SILENCE_MS", 1000))
     ack_tone_ms: int = field(default_factory=lambda: _env_int("ACK_TONE_MS", 55))
     enable_ack_tone: bool = field(default_factory=lambda: _env_bool("ENABLE_ACK_TONE", True))
 
@@ -65,12 +67,21 @@ class Settings:
     enable_barge_in: bool = field(default_factory=lambda: _env_bool("ENABLE_BARGE_IN", True))
     barge_in_ms: int = field(default_factory=lambda: _env_int("BARGE_IN_MS", 240))
 
+    # "llama" runs a local GGUF file in-process; "openai" talks to any
+    # OpenAI-compatible server (Ollama, LM Studio, vLLM, llama.cpp server, hosted APIs).
+    llm_backend: str = field(default_factory=lambda: os.getenv("LLM_BACKEND", "llama").strip().lower())
+    llm_base_url: str = field(default_factory=lambda: os.getenv("LLM_BASE_URL", ""))
+    llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", ""))
+    llm_api_key: str = field(default_factory=lambda: os.getenv("LLM_API_KEY", ""), repr=False)
     model_path: str = field(default_factory=lambda: os.getenv("MODEL_PATH", ""))
     draft_model_path: str = field(default_factory=lambda: os.getenv("DRAFT_MODEL_PATH", ""))
     piper_voice: str = field(default_factory=lambda: os.getenv("PIPER_VOICE", ""))
     asr_model_path: str = field(default_factory=lambda: os.getenv("ASR_MODEL_PATH", ""))
 
-    asr_backend: str = field(default_factory=lambda: os.getenv("ASR_BACKEND", "vosk"))
+    # vosk: fast, streaming partials, weaker accuracy. whisper: faster-whisper,
+    # far more accurate, transcribes each utterance at the endpoint.
+    asr_backend: str = field(default_factory=lambda: os.getenv("ASR_BACKEND", "whisper").strip().lower())
+    asr_language: str = field(default_factory=lambda: os.getenv("ASR_LANGUAGE", "en"))
     quant_level: str = field(default_factory=lambda: os.getenv("QUANT_LEVEL", "Q4_K_M"))
     n_gpu_layers: int = field(default_factory=lambda: _env_int("N_GPU_LAYERS", -1))
 
@@ -132,8 +143,15 @@ class Settings:
                 f"ASR_ENDPOINT_SILENCE_MS must be at least one chunk ({self.chunk_ms}ms), "
                 f"got {self.asr_endpoint_silence_ms}"
             )
-        if self.asr_backend not in {"vosk", "whispercpp"}:
-            problems.append(f"ASR_BACKEND must be 'vosk' or 'whispercpp', got {self.asr_backend!r}")
+        if self.asr_hold_silence_ms < self.asr_endpoint_silence_ms:
+            problems.append(
+                f"ASR_HOLD_SILENCE_MS ({self.asr_hold_silence_ms}) must be at least "
+                f"ASR_ENDPOINT_SILENCE_MS ({self.asr_endpoint_silence_ms})"
+            )
+        if self.asr_backend not in {"vosk", "whisper", "whispercpp"}:
+            problems.append(f"ASR_BACKEND must be 'vosk', 'whisper' or 'whispercpp', got {self.asr_backend!r}")
+        if self.llm_backend not in {"llama", "openai"}:
+            problems.append(f"LLM_BACKEND must be 'llama' or 'openai', got {self.llm_backend!r}")
         if self.llm_max_tokens <= 0:
             problems.append(f"LLM_MAX_TOKENS must be positive, got {self.llm_max_tokens}")
         if self.llm_context_size <= 0:
@@ -158,9 +176,13 @@ class Settings:
         if mock_models_enabled():
             return
 
-        required = {"MODEL_PATH": self.model_path}
+        if self.llm_backend == "openai":
+            required = {"LLM_BASE_URL": self.llm_base_url, "LLM_MODEL": self.llm_model}
+        else:
+            required = {"MODEL_PATH": self.model_path}
         if need_tts:
             required["PIPER_VOICE"] = self.piper_voice
+        # Whisper takes a size name ("base.en") or a directory and has a default.
         if need_asr and self.asr_backend in {"vosk", "whispercpp"}:
             required["ASR_MODEL_PATH"] = self.asr_model_path
 
@@ -175,7 +197,7 @@ class Settings:
         missing_paths = [
             f"{name}={value}"
             for name, value in required.items()
-            if value and not Path(value).expanduser().exists()
+            if name not in {"LLM_BASE_URL", "LLM_MODEL"} and value and not Path(value).expanduser().exists()
         ]
         if missing_paths:
             raise ConfigError(

@@ -41,12 +41,11 @@ RECOMMENDED_MODELS = [
         source="rhasspy/piper-voices",
     ),
     ModelAsset(
-        name="ASR: Vosk small English US",
-        url="https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
-        target="vosk-model-small-en-us-0.15.zip",
-        license="Apache-2.0",
-        source="Alpha Cephei Vosk models",
-        extract_to="vosk-model-small-en-us-0.15",
+        name="ASR: Whisper base.en (faster-whisper)",
+        url="",  # fetched with faster_whisper.download_model
+        target="whisper-base.en",
+        license="MIT",
+        source="Systran/faster-whisper-base.en",
     ),
 ]
 
@@ -57,8 +56,8 @@ def env_template(models_dir: Path) -> str:
         f'MODEL_PATH="{models}/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"',
         'DRAFT_MODEL_PATH=""',
         f'PIPER_VOICE="{models}/en_US-lessac-medium.onnx"',
-        f'ASR_MODEL_PATH="{models}/vosk-model-small-en-us-0.15"',
-        'ASR_BACKEND="vosk"',
+        f'ASR_MODEL_PATH="{models}/whisper-base.en"',
+        'ASR_BACKEND="whisper"',
         "VAD_AGGRESSIVENESS=2",
         "CHUNK_MS=20",
         "ASR_ENDPOINT_SILENCE_MS=300",
@@ -116,6 +115,19 @@ def _download(url: str, target: Path, show_progress: bool = True) -> None:
     partial.replace(target)
 
 
+def _download_whisper(asset: ModelAsset, target: Path) -> str:
+    try:
+        from faster_whisper import download_model  # type: ignore
+    except ImportError:
+        return f"skip {asset.name}: faster-whisper is not installed (pip install -e '.[local]')"
+    size = asset.target.removeprefix("whisper-")
+    partial = target.with_name(target.name + ".part")
+    shutil.rmtree(partial, ignore_errors=True)
+    download_model(size, output_dir=str(partial))
+    partial.replace(target)
+    return f"downloaded {asset.name}: {target}"
+
+
 def download_recommended_models(models_dir: Path) -> list[str]:
     models_dir.mkdir(parents=True, exist_ok=True)
     messages: list[str] = []
@@ -132,6 +144,9 @@ def download_recommended_models(models_dir: Path) -> list[str]:
             continue
 
         print(f"downloading {asset.name} ...", file=sys.stderr)
+        if not asset.url:
+            messages.append(_download_whisper(asset, target))
+            continue
         _download(asset.url, target)
         messages.append(f"downloaded {asset.name}: {target}")
 

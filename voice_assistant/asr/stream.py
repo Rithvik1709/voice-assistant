@@ -41,6 +41,24 @@ logger = logging.getLogger(__name__)
 # Frames kept from before the VAD fires, so the first syllable is not clipped.
 _PREROLL_FRAMES = 3
 
+# Words that almost never end a request ("turn on the ...", "and ...", "um").
+# When the transcript so far ends on one, the user is probably pausing to
+# think, so the endpoint waits longer instead of cutting them off.
+DANGLING_WORDS = frozenset(
+    """
+    a an the and or but so because if then than that which who whose what where when
+    to of for with from in on at by about into onto as like is are was were be been am
+    my your his her their our its this these those some any very really just also plus
+    um uh er erm hmm can could would should will shall do does did not
+    aur ki ka ke ko se mein toh par ya lekin kyunki jo
+    """.split()
+)
+
+
+def looks_unfinished(text: str) -> bool:
+    words = text.lower().split()
+    return bool(words) and words[-1].strip(".,!?") in DANGLING_WORDS
+
 
 @dataclass(slots=True)
 class ASREvent:
@@ -117,6 +135,72 @@ class _WhisperCppRecognizer:
         pass
 
 
+class _FasterWhisperRecognizer:
+    """Whisper through CTranslate2: much more accurate than Vosk small.
+
+    Whisper decodes a whole utterance at once, so there are no partial
+    transcripts; the utterance is transcribed as soon as the endpoint fires.
+    `model` is a local CTranslate2 model directory or a size name such as
+    "base.en" or "small" (downloaded from Hugging Face on first use).
+    """
+
+    streaming = False
+    # Segments the model itself thinks are silence are dropped: Whisper
+    # otherwise invents text ("Thank you.") for noise.
+    NO_SPEECH_THRESHOLD = 0.6
+
+    def __init__(self, model: str, sample_rate: int, language: str = "en", whisper_model: Any | None = None) -> None:
+        if whisper_model is None:
+            try:
+                from faster_whisper import WhisperModel  # type: ignore
+            except ImportError as exc:
+                raise RuntimeError(
+                    "faster-whisper is not installed. Install it with `pip install 'voice-assistant[whisper]'`."
+                ) from exc
+            whisper_model = WhisperModel(model or "base.en", device="auto", compute_type="int8")
+        if sample_rate != 16_000:
+            raise ValueError("faster-whisper expects 16 kHz audio")
+        self.model = whisper_model
+        self.language = language or None
+
+    def accept_waveform(self, audio_bytes: bytes) -> None:
+        pass
+
+    def partial_result(self) -> tuple[str, float]:
+        return "", 0.0
+
+    def final_result(self, utterance: bytes) -> tuple[str, float]:
+        if not utterance:
+            return "", 0.0
+        audio = np.frombuffer(utterance, dtype=np.int16).astype(np.float32) / 32768.0
+        segments, _info = self.model.transcribe(
+            audio,
+            language=self.language,
+            beam_size=1,
+            vad_filter=False,  # Vaani's VAD already cut the utterance
+            condition_on_previous_text=False,
+            without_timestamps=True,
+        )
+        kept = [seg for seg in segments if seg.no_speech_prob < self.NO_SPEECH_THRESHOLD]
+        text = " ".join(seg.text.strip() for seg in kept).strip()
+        confidence = float(np.exp(np.mean([seg.avg_logprob for seg in kept]))) if kept else 0.0
+        return text, confidence
+
+    def reset(self) -> None:
+        pass
+
+
+def load_recognizer(backend: str, model_path: str, sample_rate: int, language: str = "en", shared: Any = None) -> Any:
+    """Create the recognizer for `backend`, optionally reusing a loaded model."""
+    if backend == "vosk":
+        return _VoskRecognizer(model_path, sample_rate, model=shared)
+    if backend == "whisper":
+        return _FasterWhisperRecognizer(model_path, sample_rate, language=language, whisper_model=shared)
+    if backend == "whispercpp":
+        return _WhisperCppRecognizer(model_path, sample_rate)
+    raise ValueError(f"Unsupported ASR backend: {backend}")
+
+
 class StreamingASR:
     def __init__(
         self,
@@ -128,12 +212,19 @@ class StreamingASR:
         endpoint_silence_ms: int = 400,
         speech_start_frames: int = 3,
         recognizer: Any | None = None,
+        hold_silence_ms: int | None = None,
+        language: str = "en",
     ) -> None:
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
         self.vad = vad
         self.backend = backend
         self.endpoint_silence_s = max(0.01, endpoint_silence_ms / 1000.0)
+        # Longer wait used when the words so far look unfinished.
+        self.hold_silence_s = max(
+            self.endpoint_silence_s,
+            (hold_silence_ms if hold_silence_ms is not None else endpoint_silence_ms * 2.5) / 1000.0,
+        )
         self.speech_start_frames = max(1, speech_start_frames)
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -154,15 +245,12 @@ class StreamingASR:
         self._last_speech_audio = 0.0
         self._last_speech_ts = 0.0
         self._last_partial = ""
+        self._latest_words = ""
+        self._latest_words = ""
 
-        if recognizer is not None:
-            self._rec = recognizer
-        elif backend == "vosk":
-            self._rec = _VoskRecognizer(model_path, sample_rate)
-        elif backend == "whispercpp":
-            self._rec = _WhisperCppRecognizer(model_path, sample_rate)
-        else:
-            raise ValueError(f"Unsupported ASR backend: {backend}")
+        self._rec = recognizer if recognizer is not None else load_recognizer(
+            backend, model_path, sample_rate, language=language
+        )
 
     def _mic_callback(
         self,
@@ -243,15 +331,22 @@ class StreamingASR:
             if self._rec.streaming:
                 partial, conf = self._rec.partial_result()
                 stable = self._stabilizer.update(partial)
+                self._latest_words = partial
                 if stable and stable != self._last_partial:
                     self._last_partial = stable
                     events.append(ASREvent("partial", stable, conf, now_ms))
             return events
 
-        if self._audio_clock - self._last_speech_audio > self.endpoint_silence_s:
+        # The epsilon keeps float drift in the frame clock from ending a frame early.
+        if self._audio_clock - self._last_speech_audio > self._required_silence() + 1e-6:
             events.extend(self.finalize())
 
         return events
+
+    def _required_silence(self) -> float:
+        if looks_unfinished(self._latest_words):
+            return self.hold_silence_s
+        return self.endpoint_silence_s
 
     def finalize(self) -> list[ASREvent]:
         """End the current utterance now (e.g. when the audio stream closes)."""
@@ -291,7 +386,10 @@ class StreamingASR:
             while True:
                 chunk = await self._audio_queue.get()
                 for i in range(0, len(chunk) - frame_bytes + 1, frame_bytes):
-                    for event in self.process_frame(chunk[i : i + frame_bytes]):
+                    frame = chunk[i : i + frame_bytes]
+                    # Recognizers can block (Whisper decodes a whole utterance
+                    # at the endpoint), so keep them off the event loop.
+                    for event in await asyncio.to_thread(self.process_frame, frame):
                         yield event
 
 
