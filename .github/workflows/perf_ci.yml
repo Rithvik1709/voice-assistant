@@ -1,4 +1,4 @@
-name: CI Performance Regression Test
+name: CI
 
 on:
   push:
@@ -7,6 +7,42 @@ on:
     branches: [ main ]
 
 jobs:
+  test:
+    name: Lint and unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d # v5.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev libportaudio2
+
+      - name: Install Package and Dev Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check voice_assistant tests scripts
+
+      - name: Check protobuf stubs are up to date
+        run: python scripts/check_proto_stubs.py
+
+      - name: Unit Tests
+        run: pytest -q
+
   performance:
     name: Concurrent Load Performance Test
     runs-on: ubuntu-latest
@@ -23,9 +59,9 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y portaudio19-dev
+          sudo apt-get install -y portaudio19-dev libportaudio2
 
-      - name: Install Package and Dependencies
+      - name: Install Package
         run: |
           python -m pip install --upgrade pip
           pip install -e .
@@ -34,7 +70,7 @@ jobs:
         env:
           MOCK_MODELS: "1"
         run: |
-          python -m voice_assistant.main --mode server --port 50051 &
+          vaani server --port 50051 &
           sleep 3
 
       - name: Run ASR 50-Client Concurrent Load Test

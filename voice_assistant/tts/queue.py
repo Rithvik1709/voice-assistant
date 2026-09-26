@@ -74,7 +74,7 @@ async def safe_put(queue: AudioChunkQueue | asyncio.Queue, item: any, timeout: f
     try:
         await asyncio.wait_for(queue.put(item), timeout=timeout)
         return True
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Queue full, dropping audio chunk")
         if isinstance(queue, AudioChunkQueue):
             queue.record_drop()

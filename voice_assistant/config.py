@@ -7,16 +7,31 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
 
+class ConfigError(ValueError):
+    """Raised for invalid or incomplete configuration."""
+
+
 def _env_int(name: str, default: int) -> int:
-    return int(os.getenv(name, str(default)))
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
 
 
 def _env_float(name: str, default: float) -> float:
-    return float(os.getenv(name, str(default)))
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -24,6 +39,10 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def mock_models_enabled() -> bool:
+    return os.getenv("MOCK_MODELS") == "1"
 
 
 @dataclass(slots=True)
@@ -34,9 +53,17 @@ class Settings:
     chunk_size: int = 320
     vad_aggressiveness: int = field(default_factory=lambda: _env_int("VAD_AGGRESSIVENESS", 2))
     vad_speech_frames_trigger: int = 3
-    asr_endpoint_silence_ms: int = field(default_factory=lambda: _env_int("ASR_ENDPOINT_SILENCE_MS", 60))
+    # Trailing silence that ends an utterance. Natural pauses between words
+    # are often 100-250ms, so values much lower than this split sentences.
+    asr_endpoint_silence_ms: int = field(default_factory=lambda: _env_int("ASR_ENDPOINT_SILENCE_MS", 400))
     ack_tone_ms: int = field(default_factory=lambda: _env_int("ACK_TONE_MS", 55))
     enable_ack_tone: bool = field(default_factory=lambda: _env_bool("ENABLE_ACK_TONE", True))
+
+    # Barge-in lets the user interrupt the assistant by speaking. Without
+    # headphones or echo cancellation the assistant can hear itself, so it can
+    # be disabled; the microphone is then muted while the assistant speaks.
+    enable_barge_in: bool = field(default_factory=lambda: _env_bool("ENABLE_BARGE_IN", True))
+    barge_in_ms: int = field(default_factory=lambda: _env_int("BARGE_IN_MS", 240))
 
     model_path: str = field(default_factory=lambda: os.getenv("MODEL_PATH", ""))
     draft_model_path: str = field(default_factory=lambda: os.getenv("DRAFT_MODEL_PATH", ""))
@@ -55,7 +82,7 @@ class Settings:
     assistant_system_prompt: str = field(
         default_factory=lambda: os.getenv(
             "ASSISTANT_SYSTEM_PROMPT",
-            "You are Vaani, a concise voice assistant. Answer clearly in one or two short sentences unless the user asks for detail.",
+            "You are Vaani, a concise voice assistant. Your replies are spoken aloud, so answer in one or two short plain sentences unless the user asks for detail, and never use markdown, lists, code blocks or emoji.",
         )
     )
 
@@ -65,6 +92,11 @@ class Settings:
         default_factory=lambda: _env_int("CONVERSATION_HISTORY_TURNS", 10)
     )
     conversation_memory_path: str = field(default_factory=lambda: os.getenv("CONVERSATION_MEMORY_PATH", ""))
+
+    # Live weather via Open-Meteo. Off by default: it contacts the internet.
+    enable_weather: bool = field(default_factory=lambda: _env_bool("ENABLE_WEATHER", False))
+    weather_default_city: str = field(default_factory=lambda: os.getenv("WEATHER_DEFAULT_CITY", ""))
+    weather_units: str = field(default_factory=lambda: os.getenv("WEATHER_UNITS", "celsius"))
 
     tts_sample_rate: int = 22_050
     sentence_max_tokens: int = field(default_factory=lambda: _env_int("TTS_SENTENCE_MAX_TOKENS", 8))
@@ -80,7 +112,7 @@ class Settings:
         profile = os.getenv("VAANI_PROFILE", "").strip().lower()
         if profile in {"fast", "low_latency", "turbo"}:
             self.chunk_ms = min(self.chunk_ms, 20)
-            self.asr_endpoint_silence_ms = min(self.asr_endpoint_silence_ms, 50)
+            self.asr_endpoint_silence_ms = min(self.asr_endpoint_silence_ms, 300)
             self.llm_max_tokens = min(self.llm_max_tokens, 128)
             self.sentence_max_tokens = min(self.sentence_max_tokens, 6)
             self.tts_eager_min_words = min(self.tts_eager_min_words, 2)
@@ -88,22 +120,56 @@ class Settings:
 
         self.chunk_size = int(self.sample_rate * self.chunk_ms / 1000)
 
-    def validate(self) -> None:
-        if os.getenv("MOCK_MODELS") == "1":
+    def check_ranges(self) -> list[str]:
+        """Return human-readable problems with numeric settings."""
+        problems: list[str] = []
+        if self.chunk_ms not in {10, 20, 30}:
+            problems.append(f"CHUNK_MS must be 10, 20 or 30 (WebRTC VAD frame sizes), got {self.chunk_ms}")
+        if not 0 <= self.vad_aggressiveness <= 3:
+            problems.append(f"VAD_AGGRESSIVENESS must be between 0 and 3, got {self.vad_aggressiveness}")
+        if self.asr_endpoint_silence_ms < self.chunk_ms:
+            problems.append(
+                f"ASR_ENDPOINT_SILENCE_MS must be at least one chunk ({self.chunk_ms}ms), "
+                f"got {self.asr_endpoint_silence_ms}"
+            )
+        if self.asr_backend not in {"vosk", "whispercpp"}:
+            problems.append(f"ASR_BACKEND must be 'vosk' or 'whispercpp', got {self.asr_backend!r}")
+        if self.llm_max_tokens <= 0:
+            problems.append(f"LLM_MAX_TOKENS must be positive, got {self.llm_max_tokens}")
+        if self.llm_context_size <= 0:
+            problems.append(f"LLM_CONTEXT_SIZE must be positive, got {self.llm_context_size}")
+        if not 0.0 <= self.llm_temperature <= 2.0:
+            problems.append(f"LLM_TEMPERATURE must be between 0 and 2, got {self.llm_temperature}")
+        if self.sentence_max_tokens <= 0:
+            problems.append(f"TTS_SENTENCE_MAX_TOKENS must be positive, got {self.sentence_max_tokens}")
+        if self.barge_in_ms < self.chunk_ms:
+            problems.append(f"BARGE_IN_MS must be at least one chunk ({self.chunk_ms}ms), got {self.barge_in_ms}")
+        if self.weather_units.lower() not in {"celsius", "fahrenheit"}:
+            problems.append(f"WEATHER_UNITS must be 'celsius' or 'fahrenheit', got {self.weather_units!r}")
+        if not 0 < self.grpc_port < 65536:
+            problems.append(f"GRPC_PORT must be a valid TCP port, got {self.grpc_port}")
+        return problems
+
+    def validate(self, need_asr: bool = True, need_tts: bool = True) -> None:
+        problems = self.check_ranges()
+        if problems:
+            raise ConfigError("Invalid configuration:\n  - " + "\n  - ".join(problems))
+
+        if mock_models_enabled():
             return
 
-        required = {
-            "MODEL_PATH": self.model_path,
-            "PIPER_VOICE": self.piper_voice,
-        }
-        if self.asr_backend in {"vosk", "whispercpp"}:
+        required = {"MODEL_PATH": self.model_path}
+        if need_tts:
+            required["PIPER_VOICE"] = self.piper_voice
+        if need_asr and self.asr_backend in {"vosk", "whispercpp"}:
             required["ASR_MODEL_PATH"] = self.asr_model_path
 
         missing = [k for k, v in required.items() if not v]
 
         if missing:
-            raise ValueError(
-                f"Missing required environment values: {', '.join(missing)}"
+            raise ConfigError(
+                f"Missing required environment values: {', '.join(missing)}. "
+                "Run `vaani models --write-env --download` to fetch the open starter models."
             )
 
         missing_paths = [
@@ -112,23 +178,43 @@ class Settings:
             if value and not Path(value).expanduser().exists()
         ]
         if missing_paths:
-            raise ValueError(
+            raise ConfigError(
                 "Configured model paths do not exist: "
                 + ", ".join(missing_paths)
             )
 
-        if shutil.which("piper") is None:
-            raise ValueError(
-                "Piper executable not found on PATH. Install piper-tts or add "
+        if not need_tts:
+            return
+
+        from voice_assistant.tts.stream import piper_python_available
+
+        if not piper_python_available() and shutil.which("piper") is None:
+            raise ConfigError(
+                "Piper is not installed. Run `pip install piper-tts` or add "
                 "the Piper binary to PATH."
             )
 
         piper_config = Path(f"{self.piper_voice}.json").expanduser()
         if not piper_config.exists():
-            raise ValueError(
+            raise ConfigError(
                 f"Missing Piper voice config file: {piper_config}"
             )
 
     @property
     def piper_voice_path(self) -> Path:
         return Path(self.piper_voice).expanduser().resolve()
+
+    def build_actions(self):
+        """Intent actions configured from these settings."""
+        from voice_assistant.actions import BasicIntentActions
+
+        weather = None
+        if self.enable_weather:
+            from voice_assistant.weather import OpenMeteoWeather
+
+            weather = OpenMeteoWeather(unit=self.weather_units)
+        return BasicIntentActions(weather=weather, default_city=self.weather_default_city)
+
+    @property
+    def barge_in_frames(self) -> int:
+        return max(1, self.barge_in_ms // self.chunk_ms)

@@ -6,13 +6,13 @@ no runtime dependencies so it can be iterated on quickly.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
-from typing import Dict, Protocol
+from dataclasses import dataclass
+from typing import Protocol
 
 
 class IntentClassifier(Protocol):
-    def classify(self, text: str) -> Dict[str, object]:
+    def classify(self, text: str) -> dict[str, object]:
         """Return a small dict with at least `intent` and `confidence` keys."""
 
 
@@ -20,9 +20,9 @@ class IntentClassifier(Protocol):
 class _IntentResult:
     intent: str
     confidence: float
-    extras: Dict[str, object]
+    extras: dict[str, object]
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "intent": self.intent,
             "confidence": self.confidence,
@@ -75,11 +75,35 @@ class SimpleIntentClassifier:
             "weather batao",
             "mausam batao",
         ],
+        "time": [
+            "what time is it",
+            "whats the time",
+            "what is the time",
+            "tell me the time",
+            "current time",
+            "time kya hai",
+            "kitne baje",
+            "kitne baje hai",
+        ],
+        "date": [
+            "whats the date",
+            "what is the date",
+            "todays date",
+            "what day is it",
+            "what day is today",
+            "aaj ki date",
+            "aaj kya date hai",
+        ],
     }
+
+    # Keywords too generic to trigger an intent on their own ("how do I play
+    # chess" is not a music request).
+    WEAK_KEYWORDS = {"play"}
 
     def _normalize(self, text: str) -> str:
         """Normalize text for lightweight matching."""
         text = text.lower()
+        text = re.sub(r"['’]", "", text)
         text = re.sub(r"[^\w\s]", " ", text)
         return " ".join(text.split())
 
@@ -89,7 +113,7 @@ class SimpleIntentClassifier:
                 return True
         return False
 
-    def classify(self, text: str) -> Dict[str, object]:
+    def classify(self, text: str) -> dict[str, object]:
         if not text or not text.strip():
             return {"intent": "none", "confidence": 0.0}
 
@@ -100,35 +124,31 @@ class SimpleIntentClassifier:
         scores: dict[str, int] = {
             k: 0 for k in self.INTENT_KEYWORDS
         }
+        strong: dict[str, bool] = {k: False for k in self.INTENT_KEYWORDS}
 
+        padded = f" {lowered} "
         for intent, keys in self.INTENT_KEYWORDS.items():
             for kw in keys:
-                if f" {kw} " in f" {lowered} ":
+                if f" {kw} " in padded:
                     scores[intent] += 1
+                    if kw not in self.WEAK_KEYWORDS:
+                        strong[intent] = True
 
         best_intent = max(scores, key=lambda k: scores[k])
         best_score = scores[best_intent]
+        lang = "hi" if devanagari else "en"
+        extras: dict[str, object] = {"lang": lang, "word_count": len(lowered.split())}
 
         if best_score == 0:
-            if devanagari:
-                return _IntentResult(
-                    "greeting",
-                    0.5,
-                    {"lang": "hi"},
-                ).to_dict()
-
-            return _IntentResult(
-                "unknown",
-                0.2,
-                {"lang": "und"},
-            ).to_dict()
+            # No keyword matched. Devanagari text is still only "unknown":
+            # it must reach the LLM rather than a canned reply.
+            extras["lang"] = lang if devanagari else "und"
+            return _IntentResult("unknown", 0.2, extras).to_dict()
 
         # confidence scales with count; clamp to [0.2, 0.95]
         confidence = min(0.95, 0.2 + 0.3 * best_score)
-
-        extras = {
-            "lang": "hi" if devanagari else "en"
-        }
+        if not strong[best_intent]:
+            confidence = min(confidence, 0.35)
 
         return _IntentResult(
             best_intent,

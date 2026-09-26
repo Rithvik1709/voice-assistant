@@ -23,3 +23,13 @@ def test_session_memory_skips_invalid_lines(tmp_path: Path) -> None:
     )
 
     assert SessionMemory(path).load_recent(5) == [{"role": "user", "content": "hello"}]
+
+
+def test_session_memory_compacts_when_full(tmp_path: Path) -> None:
+    memory = SessionMemory(tmp_path / "session.jsonl", max_messages=10)
+    for i in range(25):
+        memory.append("user", f"message {i}")
+
+    lines = (tmp_path / "session.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) <= 10
+    assert memory.load_recent(1) == [{"role": "user", "content": "message 24"}]
