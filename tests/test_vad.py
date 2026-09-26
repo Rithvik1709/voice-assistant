@@ -1,7 +1,9 @@
 import os
 import struct
 import wave
+
 from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
+
 
 def _pcm_frame(value: int, samples: int) -> bytes:
     return struct.pack("<" + "h" * samples, *([value] * samples))
@@ -22,7 +24,8 @@ def test_vad_detects_speech_in_noisy_audio() -> None:
     import pytest
     try:
         import torch
-        from voice_assistant.asr.vad import load_silero_vad, VADIterator
+
+        from voice_assistant.asr.vad import VADIterator, load_silero_vad
         if load_silero_vad is None or VADIterator is None or torch is None:
             pytest.skip("silero-vad or torch dependencies are missing")
     except ImportError:
@@ -52,7 +55,7 @@ def test_vad_detects_speech_in_noisy_audio() -> None:
         for i in range(0, len(audio_data), frame_length)
         if len(audio_data[i : i + frame_length]) == frame_length
     ]
-    
+
     assert len(frames) > 0, "No frames extracted! Pad calculation failed."
 
     # 5. Process frames and ASSERT that speech was successfully captured

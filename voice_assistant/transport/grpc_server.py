@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import signal
 import time
-import os
 from collections.abc import AsyncIterator
 from typing import Any
 
 import grpc
 
+from voice_assistant.asr.stream import ASREvent, StreamingASR, _VoskRecognizer
 from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
 from voice_assistant.audio import make_ack_tone
 from voice_assistant.benchmark import BenchmarkTracker
-from voice_assistant.config import Settings
-from voice_assistant.llm.client import LLMConfig, StreamingLLMClient
-from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue
+from voice_assistant.config import Settings, mock_models_enabled
+from voice_assistant.llm.client import LLMConfig, StreamingLLMClient, warm_up_llm
+from voice_assistant.mocks import MockLLMClient, MockPiperStreamingTTS, MockRecognizer  # noqa: F401 (re-exported)
+from voice_assistant.nlu import SimpleIntentClassifier
+from voice_assistant.tts.queue import AudioChunkQueue
 from voice_assistant.tts.stream import PiperConfig, PiperStreamingTTS, sentence_chunks_from_tokens
 
 logger = logging.getLogger(__name__)
@@ -29,81 +31,263 @@ except Exception as exc:  # pragma: no cover - runtime setup
     ) from exc
 
 try:
-    from vosk import KaldiRecognizer, Model  # type: ignore
+    from vosk import Model  # type: ignore
     _VOSK_AVAILABLE = True
 except ImportError:
     _VOSK_AVAILABLE = False
-    class Model:  # type: ignore
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
-    class KaldiRecognizer:  # type: ignore
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
+
+EOS = "<eos>"
+FALLBACK_REPLY = "Sorry, something went wrong. Please try again."
 
 
 # =====================================================================
-# High-Fidelity Mock Implementations for Performance Testing & CI Jobs
+# Per-stream session
 # =====================================================================
 
-class MockKaldiRecognizer:
-    def __init__(self) -> None:
-        pass
+class _VoiceSession:
+    """State and tasks for one StreamVoice call."""
 
-    def AcceptWaveform(self, frame: bytes) -> bool:
-        # Simulate short CPU decoding time (5ms)
-        time.sleep(0.005)
-        return True
+    def __init__(self, service: VoiceAssistantService) -> None:
+        self.service = service
+        self.settings = service.settings
+        self.bench = BenchmarkTracker()
+        self.history: list[dict[str, str]] = []
+        if self.settings.assistant_system_prompt.strip():
+            self.history.append({"role": "system", "content": self.settings.assistant_system_prompt.strip()})
 
-    def PartialResult(self) -> str:
-        return '{"partial": "hello"}'
+        mock = mock_models_enabled()
+        vad = VoiceActivityDetector(
+            VADConfig(
+                sample_rate=self.settings.sample_rate,
+                frame_ms=self.settings.chunk_ms,
+                aggressiveness=self.settings.vad_aggressiveness,
+                # Mock mode uses energy VAD so synthetic audio is detected reliably.
+                mode="energy" if mock else "webrtc",
+            )
+        )
+        recognizer = MockRecognizer() if mock else _VoskRecognizer(
+            self.settings.asr_model_path, self.settings.sample_rate, model=service.vosk_model
+        )
+        self.asr = StreamingASR(
+            sample_rate=self.settings.sample_rate,
+            chunk_size=self.settings.chunk_size,
+            vad=vad,
+            model_path=self.settings.asr_model_path,
+            endpoint_silence_ms=self.settings.asr_endpoint_silence_ms,
+            speech_start_frames=self.settings.barge_in_frames,
+            recognizer=recognizer,
+        )
 
-    def FinalResult(self) -> str:
-        return '{"text": "hello world"}'
+        self.tts_queue = AudioChunkQueue(maxsize=self.settings.tts_queue_maxsize)
+        if mock:
+            self.tts: Any = MockPiperStreamingTTS(None, self.tts_queue, bench=self.bench)
+        else:
+            self.tts = PiperStreamingTTS(
+                PiperConfig(self.settings.piper_voice_path, self.settings.tts_sample_rate),
+                playback_queue=self.tts_queue,
+                bench=self.bench,
+            )
 
-    def Reset(self) -> None:
-        pass
+        self.token_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
+        self.responses: asyncio.Queue[pb2.AudioResponse | None] = asyncio.Queue()
+        self.response_task: asyncio.Task[None] | None = None
+        self.pump_task: asyncio.Task[None] | None = None
+        # Whether audio was sent since the user last spoke; if so a barge-in
+        # tells the client to drop whatever it still has buffered.
+        self.sent_audio = False
+        self.pending_frame = bytearray()
 
-
-class MockLLMClient:
-    async def stream_tokens(
-        self,
-        messages: list[dict[str, str]] | str,
-        out_queue: asyncio.Queue[str],
-    ) -> str:
-        tokens = ["Hello", " this", " is", " a", " mock", " response", " from", " the", " assistant", "."]
-        for tok in tokens:
-            try:
-                await asyncio.wait_for(out_queue.put(tok), timeout=10.0)
-            except asyncio.TimeoutError as exc:
-                logger.error("LLM output queue backpressure; aborting generation task")
-                raise RuntimeError("LLM output queue full; generation aborted") from exc
-            await asyncio.sleep(0.005)
-        return "Hello this is a mock response from the assistant."
-
-
-class MockPiperStreamingTTS:
-    def __init__(self, config: PiperConfig | None, playback_queue: AudioChunkQueue, bench: BenchmarkTracker | None = None) -> None:
-        self.playback_queue = playback_queue
-        self.bench = bench
+    # ----- lifecycle -------------------------------------------------
 
     async def start(self) -> None:
-        pass
+        await self.tts.start()
+        self.pump_task = asyncio.create_task(self._pump_audio())
 
-    async def stop(self) -> None:
-        pass
+    async def close(self) -> None:
+        self.cancel_response()
+        if self.pump_task is not None:
+            self.pump_task.cancel()
+            await asyncio.gather(self.pump_task, return_exceptions=True)
+        await self.tts.stop()
 
-    async def synthesize_sentence(self, sentence: str) -> bool:
-        # Generate dummy 1 second 22050Hz 16-bit mono silent chunk
-        pcm16 = b"\x00\x00" * 22050
-        chunk = AudioChunk(pcm16=pcm16, sample_rate=22050, debug_text=sentence)
+    # ----- input -----------------------------------------------------
+
+    async def feed(self, pcm16: bytes) -> None:
+        """Split incoming audio into VAD frames regardless of chunk size."""
+        self.pending_frame.extend(pcm16)
+        frame_bytes = self.asr.vad.frame_bytes
+        while len(self.pending_frame) >= frame_bytes:
+            frame = bytes(self.pending_frame[:frame_bytes])
+            del self.pending_frame[:frame_bytes]
+            events = await asyncio.to_thread(self.asr.process_frame, frame)
+            for event in events:
+                await self._handle_event(event)
+
+    async def end_of_input(self) -> None:
+        """The client half-closed: answer whatever was said, then drain."""
+        for event in await asyncio.to_thread(self.asr.finalize):
+            await self._handle_event(event)
+        if self.response_task is not None:
+            await asyncio.gather(self.response_task, return_exceptions=True)
+        await self.tts.flush()
+        while not self.tts_queue.empty():
+            await asyncio.sleep(0.005)
+
+    async def _handle_event(self, event: ASREvent) -> None:
+        if event.type == "speech_start":
+            self.barge_in()
+            return
+        if event.type != "final" or not event.text.strip():
+            return
+
+        self.barge_in()
+        # Tell the client what was heard, so it can show the conversation.
+        self.responses.put_nowait(pb2.AudioResponse(transcript=event.text.strip(), timestamp_ms=_now_ms()))
+        self.bench.reset()
+        if event.speech_end_ts is not None:
+            self.bench.current.speech_end_ts = event.speech_end_ts
+        self.bench.mark("final_text_ts")
+
+        if self.settings.enable_ack_tone:
+            ack_pcm = make_ack_tone(self.tts.sample_rate, self.settings.ack_tone_ms)
+            if ack_pcm:
+                self.bench.mark("first_audio_ts")
+                self._send(ack_pcm, self.tts.sample_rate, "[ack]")
+
+        self.response_task = asyncio.create_task(self._respond(event.text.strip()))
+
+    # ----- interruption ---------------------------------------------
+
+    def barge_in(self) -> None:
+        was_active = self.cancel_response()
+        if was_active or self.sent_audio:
+            self.responses.put_nowait(pb2.AudioResponse(interrupt=True, timestamp_ms=_now_ms()))
+        self.sent_audio = False
+
+    def cancel_response(self) -> bool:
+        active = self.response_task is not None and not self.response_task.done()
+        if active:
+            self.response_task.cancel()  # type: ignore[union-attr]
+        self.response_task = None
+        while not self.token_queue.empty():
+            self.token_queue.get_nowait()
+        self.tts.cancel_pending()
+        self.tts_queue.clear()
+        # Drop audio that was queued for the client but not yet sent.
+        kept = []
+        while not self.responses.empty():
+            item = self.responses.get_nowait()
+            if item is None or item.interrupt or item.transcript:
+                kept.append(item)
+        for item in kept:
+            self.responses.put_nowait(item)
+        return active
+
+    # ----- response generation --------------------------------------
+
+    async def _respond(self, text: str) -> None:
+        self.bench.mark("prompt_sent_ts")
+        self.history.append({"role": "user", "content": text})
+        reply = ""
         try:
-            await self.playback_queue.put(chunk)
-            return True
+            reply = await asyncio.to_thread(self._action_reply, text)
+            if reply:
+                await self._speak(reply)
+            else:
+                generation = asyncio.create_task(
+                    self.service.llm.stream_tokens(self.history, self.token_queue, bench=self.bench)
+                )
+                try:
+                    await self._speak_stream(generation)
+                    reply = generation.result()
+                finally:
+                    if not generation.done():
+                        generation.cancel()
+                        await asyncio.gather(generation, return_exceptions=True)
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            return False
+            logger.exception("Assistant response failed")
+            await self._speak(FALLBACK_REPLY)
+        if reply:
+            self.history.append({"role": "assistant", "content": reply})
+            self._prune_history()
+        await self.tts.flush()
+        metrics = {k: v for k, v in self.bench.snapshot().items() if v is not None}
+        logger.info("Turn metrics: %s", metrics)
 
-    async def flush(self) -> None:
-        pass
+    def _action_reply(self, text: str) -> str:
+        intent = self.service.nlu.classify(text)
+        result = self.service.actions.handle(text, intent)
+        return result.response.strip() if result.handled else ""
+
+    async def _speak(self, text: str) -> None:
+        for sentence in sentence_chunks_from_tokens([text], max_tokens=self.settings.sentence_max_tokens):
+            await self.tts.synthesize_sentence(sentence)
+
+    async def _speak_stream(self, generation: asyncio.Task[str]) -> None:
+        tokens: list[str] = []
+
+        async def next_token() -> str:
+            get = asyncio.ensure_future(self.token_queue.get())
+            await asyncio.wait({get, generation}, return_when=asyncio.FIRST_COMPLETED)
+            if get.done():
+                return get.result()
+            get.cancel()
+            # Generation finished (or failed); drain what it already queued.
+            if not self.token_queue.empty():
+                return self.token_queue.get_nowait()
+            generation.result()  # re-raise a generation failure
+            return EOS
+
+        while True:
+            tok = await next_token()
+            if tok == EOS:
+                remaining = "".join(tokens).strip()
+                if remaining:
+                    await self.tts.synthesize_sentence(remaining)
+                return
+
+            tokens.append(tok)
+            ready = sentence_chunks_from_tokens(tokens, max_tokens=self.settings.sentence_max_tokens)
+            if ready and (len(ready) > 1 or ready[-1].endswith((".", "!", "?"))):
+                for sentence in ready[:-1]:
+                    await self.tts.synthesize_sentence(sentence)
+                if ready[-1].endswith((".", "!", "?")):
+                    await self.tts.synthesize_sentence(ready[-1])
+                    tokens = []
+                else:
+                    tokens = [ready[-1]]
+
+    def _prune_history(self) -> None:
+        max_messages = self.settings.conversation_history_turns * 2
+        system = [m for m in self.history if m.get("role") == "system"][:1]
+        chat = [m for m in self.history if m.get("role") != "system"][-max_messages:]
+        self.history[:] = system + chat
+
+    # ----- output ----------------------------------------------------
+
+    async def _pump_audio(self) -> None:
+        while True:
+            chunk = await self.tts_queue.get()
+            if self.bench.current.first_audio_ts is None:
+                self.bench.mark("first_audio_ts")
+            self._send(chunk.pcm16, chunk.sample_rate, chunk.debug_text)
+
+    def _send(self, pcm16: bytes, sample_rate: int, debug_text: str) -> None:
+        self.sent_audio = True
+        self.responses.put_nowait(
+            pb2.AudioResponse(
+                pcm16=pcm16,
+                sample_rate=sample_rate,
+                timestamp_ms=_now_ms(),
+                debug_text=debug_text,
+            )
+        )
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 # =====================================================================
@@ -113,17 +297,19 @@ class MockPiperStreamingTTS:
 class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.bench = BenchmarkTracker()
+        self.nlu = SimpleIntentClassifier()
+        self.actions = settings.build_actions()
+        self.vosk_model: Any = None
 
         # Check if high-fidelity mock mode is enabled (for regression testing/CI)
-        if os.getenv("MOCK_MODELS") == "1":
+        if mock_models_enabled():
             logger.info("Starting gRPC service in HIGH-FIDELITY MOCK MODE (MOCK_MODELS=1)")
-            self._vosk_model = None
-            self.llm = MockLLMClient()
+            self.llm: Any = MockLLMClient()
         else:
             if not _VOSK_AVAILABLE:
-                raise RuntimeError("vosk is not installed")
-            self._vosk_model = Model(settings.asr_model_path)
+                raise RuntimeError("vosk is not installed. Install it with `pip install 'voice-assistant[local]'`.")
+            # One model shared by every stream; each stream gets its own recognizer.
+            self.vosk_model = Model(settings.asr_model_path)
             self.llm = StreamingLLMClient(
                 LLMConfig(
                     model_path=settings.model_path,
@@ -132,315 +318,70 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
                     max_tokens=settings.llm_max_tokens,
                     temperature=settings.llm_temperature,
                 ),
-                bench=self.bench,
             )
 
     async def StreamVoice(
         self, request_iterator: AsyncIterator[pb2.AudioChunk], context: grpc.aio.ServicerContext
     ) -> AsyncIterator[pb2.AudioResponse]:
-        bench = BenchmarkTracker()
-        speech_buffer = bytearray()
-        conversation_history: list[dict[str, str]] = []
-        if self.settings.assistant_system_prompt.strip():
-            conversation_history.append(
-                {
-                    "role": "system",
-                    "content": self.settings.assistant_system_prompt.strip(),
-                }
-            )
-        
-        # Mock mode uses energy VAD (no binary dependency). Production uses webrtc VAD (more accurate).
-        vad_mode = "energy" if os.getenv("MOCK_MODELS") == "1" else "webrtc"
-        stream_vad = VoiceActivityDetector(
-            VADConfig(
-                sample_rate=self.settings.sample_rate,
-                frame_ms=self.settings.chunk_ms,
-                aggressiveness=self.settings.vad_aggressiveness,
-                mode=vad_mode,
-            )
-        )
+        session = _VoiceSession(self)
+        await session.start()
 
-        # Instantiate per-stream TTS and queue to isolate concurrent requests and enable parallel synthesis
-        if os.getenv("MOCK_MODELS") == "1":
-            tts_queue = AudioChunkQueue(maxsize=self.settings.tts_queue_maxsize)
-            tts = MockPiperStreamingTTS(None, tts_queue, bench=self.bench)
-            recognizer = MockKaldiRecognizer()
-        else:
-            if not _VOSK_AVAILABLE:
-                raise RuntimeError("vosk is not installed")
-            recognizer = KaldiRecognizer(self._vosk_model, self.settings.sample_rate)
-            tts_queue = AudioChunkQueue(maxsize=self.settings.tts_queue_maxsize)
-            tts = PiperStreamingTTS(
-                PiperConfig(self.settings.piper_voice_path, self.settings.tts_sample_rate),
-                playback_queue=tts_queue,
-                bench=self.bench
-            )
-
-        # Start TTS process/workers for this stream
-        await tts.start()
-        
-        token_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
-        response_queue: asyncio.Queue[pb2.AudioResponse | None] = asyncio.Queue()
-
-        active_llm_task: asyncio.Task | None = None
-        active_response_task: asyncio.Task | None = None
-        active_audio_stream_task: asyncio.Task | None = None
-
-        async def cancel_active_response(await_cleanup: bool = False):
-            nonlocal active_llm_task, active_response_task, active_audio_stream_task
-            if active_llm_task and not active_llm_task.done():
-                active_llm_task.cancel()
-                if await_cleanup:
-                    try:
-                        await active_llm_task
-                    except asyncio.CancelledError:
-                        pass
-                active_llm_task = None
-
-            if active_response_task and not active_response_task.done():
-                active_response_task.cancel()
-                if await_cleanup:
-                    try:
-                        await active_response_task
-                    except asyncio.CancelledError:
-                        pass
-                active_response_task = None
-
-            if active_audio_stream_task and not active_audio_stream_task.done():
-                active_audio_stream_task.cancel()
-                if await_cleanup:
-                    try:
-                        await active_audio_stream_task
-                    except asyncio.CancelledError:
-                        pass
-                active_audio_stream_task = None
-
-            # Drain token_queue
-            while not token_queue.empty():
-                try:
-                    token_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-
-            # Clear tts_queue
-            tts_queue.clear()
-
-            # Drain tts ingest_queue
-            if hasattr(tts, "ingest_queue"):
-                while not tts.ingest_queue.empty():
-                    try:
-                        tts.ingest_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-
-            # Drain response_queue
-            while not response_queue.empty():
-                try:
-                    response_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-
-        async def read_requests():
-            nonlocal active_llm_task, active_response_task, active_audio_stream_task
+        async def read_requests() -> None:
             try:
                 async for req in request_iterator:
-                    frame = req.pcm16
-                    if not frame:
-                        continue
-
-                    speech = stream_vad.is_speech(frame[: stream_vad.frame_bytes]) if len(frame) >= stream_vad.frame_bytes else False
-                    if speech:
-                        if not speech_buffer:
-                            # New speech starting! Trigger interruption if assistant is active
-                            await cancel_active_response(await_cleanup=False)
-                        speech_buffer.extend(frame)
-                        continue
-
-                    if speech_buffer:
-                        # Offload single-pass ASR on complete buffer to thread pool exactly once at end-of-speech
-                        await asyncio.to_thread(recognizer.AcceptWaveform, bytes(speech_buffer))
-                        text = self._extract_final(recognizer)
-                        speech_buffer.clear()
-
-                        if not text.strip():
-                            continue
-
-                        self.bench.mark("prompt_sent_ts")
-
-                        # Cancel any active response first (though we likely already did when speech started)
-                        await cancel_active_response(await_cleanup=False)
-
-                        if self.settings.enable_ack_tone:
-                            ack_pcm = make_ack_tone(
-                                self.settings.tts_sample_rate,
-                                self.settings.ack_tone_ms,
-                            )
-                        else:
-                            ack_pcm = b""
-
-                        if ack_pcm:
-                            await response_queue.put(pb2.AudioResponse(
-                                pcm16=ack_pcm,
-                                sample_rate=self.settings.tts_sample_rate,
-                                timestamp_ms=int(time.time() * 1000),
-                                debug_text="[ack]",
-                            ))
-
-                        # Run LLM streaming in a background task and append "<eos>" at the end
-                        async def run_llm():
-                            try:
-                                conversation_history.append(
-                                    {"role": "user", "content": text}
-                                )
-                                assistant_reply = await self.llm.stream_tokens(
-                                    conversation_history,
-                                    token_queue,
-                                )
-                                conversation_history.append(
-                                    {
-                                        "role": "assistant",
-                                        "content": assistant_reply,
-                                    }
-                                )
-                                max_messages = self.settings.conversation_history_turns * 2
-                                system_messages = [
-                                    item for item in conversation_history
-                                    if item.get("role") == "system"
-                                ]
-                                chat_messages = [
-                                    item for item in conversation_history
-                                    if item.get("role") != "system"
-                                ]
-                                del chat_messages[:-max_messages]
-                                conversation_history[:] = system_messages[:1] + chat_messages
-                            except asyncio.CancelledError:
-                                raise
-                            except Exception as e:
-                                logger.error("Error in LLM stream_tokens: %s", e)
-                            finally:
-                                await token_queue.put("<eos>")
-
-                        active_llm_task = asyncio.create_task(run_llm())
-
-                        # Start response processor task
-                        async def process_response():
-                            tokens: list[str] = []
-                            try:
-                                while True:
-                                    tok = await token_queue.get()
-                                    if tok == "<eos>":
-                                        # Flush remaining tokens
-                                        remaining_sentence = "".join(tokens).strip()
-                                        if remaining_sentence:
-                                            await tts.synthesize_sentence(remaining_sentence)
-                                        break
-
-                                    tokens.append(tok)
-                                    ready = sentence_chunks_from_tokens(tokens, max_tokens=self.settings.sentence_max_tokens)
-                                    if ready and (len(ready) > 1 or ready[-1].endswith(('.', '!', '?'))):
-                                        for sentence in ready[:-1]:
-                                            await tts.synthesize_sentence(sentence)
-
-                                        # If the last chunk is also a complete sentence, synthesize it immediately too
-                                        if ready[-1].endswith(('.', '!', '?')):
-                                            await tts.synthesize_sentence(ready[-1])
-                                            tokens = []
-                                        else:
-                                            tokens = [ready[-1]]
-
-                                logger.info("metrics=%s", self.bench.snapshot())
-                                self.bench.reset()
-                            except asyncio.CancelledError:
-                                logger.info("Response processor task was cancelled")
-                                raise
-                            except Exception as e:
-                                logger.error("Error in response processor: %s", e, exc_info=True)
-
-                        active_response_task = asyncio.create_task(process_response())
-
-                        # Start independent audio streaming task to drain tts_queue
-                        async def stream_audio_responses():
-                            try:
-                                while True:
-                                    chunk = await tts_queue.get()
-                                    await response_queue.put(pb2.AudioResponse(
-                                        pcm16=chunk.pcm16,
-                                        sample_rate=chunk.sample_rate,
-                                        timestamp_ms=int(time.time() * 1000),
-                                        debug_text=chunk.debug_text,
-                                    ))
-                            except asyncio.CancelledError:
-                                pass
-                            except Exception as e:
-                                logger.error("Error in stream_audio_responses: %s", e)
-
-                        active_audio_stream_task = asyncio.create_task(stream_audio_responses())
-
+                    if req.pcm16:
+                        await session.feed(req.pcm16)
+                await session.end_of_input()
             except asyncio.CancelledError:
-                logger.info("Request reader task was cancelled")
                 raise
-            except Exception as e:
-                logger.error("Error in request reader: %s", e, exc_info=True)
+            except Exception:
+                logger.exception("Error in request reader")
             finally:
-                # Wait for any active response task to complete before ending the stream
-                if active_response_task and not active_response_task.done():
-                    try:
-                        await active_response_task
-                    except Exception as e:
-                        logger.error("Error waiting for active response task: %s", e)
-                if active_audio_stream_task and not active_audio_stream_task.done():
-                    active_audio_stream_task.cancel()
-                    try:
-                        await active_audio_stream_task
-                    except Exception as e:
-                        logger.error("Error waiting for active audio stream task: %s", e)
-                # Signal the response queue to stop yielding
-                await response_queue.put(None)
+                session.responses.put_nowait(None)
 
         read_task = asyncio.create_task(read_requests())
 
         try:
             while True:
-                response = await response_queue.get()
+                response = await session.responses.get()
                 if response is None:
                     break
                 yield response
         finally:
             read_task.cancel()
-            await cancel_active_response(await_cleanup=True)
-            try:
-                await read_task
-            except asyncio.CancelledError:
-                pass
-            # Ensure TTS subprocess and queue resources are cleanly torn down
-            await tts.stop()
+            await asyncio.gather(read_task, return_exceptions=True)
+            await session.close()
 
-    def _extract_partial(self, recognizer) -> str:
-        import json
-
-        raw = recognizer.PartialResult()
-        try:
-            data = json.loads(raw)
-            return data.get("partial", "")
-        except Exception:
-            return ""
-
-    def _extract_final(self, recognizer) -> str:
-        import json
-        raw = recognizer.FinalResult()
-        try:
-            data = json.loads(raw)
-            return data.get("text", "")
-        except Exception:
-            return ""
 
 async def serve(host: str, port: int, settings: Settings) -> None:
     server = grpc.aio.server()
-    pb2_grpc.add_VoiceAssistantServicer_to_server(VoiceAssistantService(settings), server)
-    server.add_insecure_port(f"{host}:{port}")
+    service = VoiceAssistantService(settings)
+    pb2_grpc.add_VoiceAssistantServicer_to_server(service, server)
+    await warm_up_llm(service.llm, settings.assistant_system_prompt)
+    bound = server.add_insecure_port(f"{host}:{port}")
+    if bound == 0:
+        raise RuntimeError(f"Could not bind gRPC server to {host}:{port}")
     await server.start()
     logger.info("gRPC server listening on %s:%s", host, port)
+
+    # Stop gracefully on SIGTERM (docker stop, systemd, Kubernetes): in-flight
+    # streams get a grace period instead of being cut off.
+    stopping = asyncio.Event()
+    loop = asyncio.get_running_loop()
     try:
-        await server.wait_for_termination()
+        loop.add_signal_handler(signal.SIGTERM, stopping.set)
+    except (NotImplementedError, RuntimeError):  # Windows / non-main thread
+        pass
+    # Cancelling wait_for_termination() would cancel gRPC's shutdown future,
+    # so it is left to finish on its own once the server has stopped.
+    waiter = asyncio.create_task(server.wait_for_termination())
+    stopper = asyncio.create_task(stopping.wait())
+    try:
+        await asyncio.wait({waiter, stopper}, return_when=asyncio.FIRST_COMPLETED)
+        if stopping.is_set():
+            logger.info("SIGTERM received; shutting down gRPC server")
     finally:
-        await server.stop(grace=2)
+        stopper.cancel()
+        await server.stop(grace=5)
+        await asyncio.gather(waiter, stopper, return_exceptions=True)
+        logger.info("gRPC server stopped")

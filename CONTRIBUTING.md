@@ -129,18 +129,24 @@ Please follow these guidelines:
 
 # 🧪 Running Tests
 
-Run tests before submitting a PR:
+Run the tests and linter before submitting a PR:
 
 ```bash
+pip install -e ".[dev]"
 pytest -q
+ruff check voice_assistant tests scripts
 ```
 
-Current test coverage includes:
+The tests use fakes for models, the microphone, and speakers, so no downloads are needed. Current coverage includes:
 
-* VAD boundary behavior
-* Sentence chunking
-* Streaming TTS
-* Speculative decoding logic
+* Barge-in, cancellation, and error recovery in the orchestrator
+* ASR endpointing, pre-roll, and Vosk segment handling
+* Non-blocking LLM streaming
+* The TTS worker, Piper process handling, and audio playback
+* gRPC streaming and interruption (mock mode)
+* NLU, intent actions, configuration, and speculative decoding
+
+If you change `voice_assistant.proto`, regenerate the stubs (see the README) and run `python scripts/check_proto_stubs.py`.
 
 ---
 

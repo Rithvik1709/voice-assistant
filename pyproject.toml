@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voice-assistant"
-version = "1.0.0"
-description = "Real-time streaming voice assistant with ASR, LLM token streaming, and chunked TTS"
+dynamic = ["version"]
+description = "Vaani: real-time streaming voice assistant with ASR, LLM token streaming, and chunked TTS"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -19,32 +19,49 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+# Core dependencies are light and have prebuilt wheels everywhere. The model
+# runtimes live in the `local` extra so the gRPC server can run in mock mode
+# (CI, benchmarks) without compiling llama.cpp.
 dependencies = [
     "python-dotenv>=1.0.1",
     "sounddevice>=0.4.6",
-    "numpy>=1.26.4,<2.0.0",
-    "webrtcvad>=2.0.10",
-    "silero-vad>=5.1.2",
-    "vosk>=0.3.45",
-    "llama-cpp-python>=0.3.0",
-    "grpcio>=1.62.0",
-    "aiortc>=1.7.0",
-    "opentelemetry-api",
-    "opentelemetry-sdk",
-    "opentelemetry-exporter-otlp",
-    "opentelemetry-instrumentation-grpc",
+    "numpy>=1.26.4",
+    "webrtcvad-wheels>=2.0.14",
+    "grpcio>=1.66.2",
+    "protobuf>=5.27.2",
+    "opentelemetry-api>=1.20",
 ]
 
 [project.optional-dependencies]
+local = [
+    "vosk>=0.3.44",
+    "llama-cpp-python>=0.3.0",
+    "piper-tts>=1.2.0",
+]
+silero = ["silero-vad>=5.1.2"]
+webrtc = ["aiortc>=1.7.0"]
+otel = [
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp>=1.20",
+    "opentelemetry-instrumentation-grpc",
+]
+all = ["voice-assistant[local,silero,webrtc,otel]"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "build>=1.2.0",
-    "grpcio-tools>=1.62.0",
+    "grpcio-tools>=1.66.2",
     "twine>=5.0.0",
+    "ruff>=0.6.0",
 ]
 cuda = ["llama-cpp-python[cuda]>=0.3.0"]
 metal = ["llama-cpp-python[metal]>=0.3.0"]
+
+[project.scripts]
+vaani = "voice_assistant.main:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "voice_assistant.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -55,6 +72,7 @@ include = ["voice_assistant*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 pythonpath = ["."]
 filterwarnings = [
     "ignore:pkg_resources is deprecated as an API:UserWarning:webrtcvad",
@@ -62,3 +80,12 @@ filterwarnings = [
     "ignore:path is deprecated\\. Use files\\(\\) instead\\.:DeprecationWarning:silero_vad\\.model",
     "ignore:`torch\\.jit\\.load` is deprecated\\.:DeprecationWarning:torch\\.jit\\._serialization",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["voice_assistant/transport/voice_assistant_pb2*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC"]
+ignore = ["E501", "UP007", "UP035", "B008", "ASYNC109", "ASYNC110"]

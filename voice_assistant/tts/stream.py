@@ -1,38 +1,43 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import json
 import logging
 import re
-import struct
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-import json
+from typing import Any, Protocol
 
 from voice_assistant.benchmark import BenchmarkTracker
+from voice_assistant.tts.normalize import normalize_for_speech
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue, safe_put
 
 logger = logging.getLogger(__name__)
 
 _SENTENCE_SPLIT = re.compile(r"([.!?]+(?:\s+|$))")
 _PIPER_TIMEOUT_S = 30.0
+_MAX_BATCH = 4
 
 
 def sentence_chunks_from_tokens(tokens: list[str], max_tokens: int = 28) -> list[str]:
+    """Split streamed tokens into sentences, capping each chunk at `max_tokens` words."""
     text = "".join(tokens).strip()
     if not text:
         return []
 
-    # split with captures so we keep the delimiters
+    # Split with captures so the sentence delimiters are kept.
     parts = _SENTENCE_SPLIT.split(text)
-    
+
     chunks = []
     for i in range(0, len(parts) - 1, 2):
-        sentence = parts[i] + parts[i+1]
+        sentence = parts[i] + parts[i + 1]
         if sentence.strip():
             chunks.append(sentence.strip())
-    
+
     if len(parts) % 2 == 1 and parts[-1].strip():
         chunks.append(parts[-1].strip())
 
@@ -40,16 +45,11 @@ def sentence_chunks_from_tokens(tokens: list[str], max_tokens: int = 28) -> list
         return [text]
 
     out: list[str] = []
-    # If we want to split into sentences EVEN IF they fit in max_tokens, 
-    # we need to change the logic. The current logic joins them if they fit.
-    # The test expectation is ["Hello there.", "How are you?", "I am fine!"]
-    # which means it wants EXACTLY one sentence per chunk if possible.
-    
     for chunk in chunks:
         words = chunk.split()
         if not words:
             continue
-            
+
         if len(words) > max_tokens:
             for i in range(0, len(words), max_tokens):
                 out.append(" ".join(words[i:i + max_tokens]))
@@ -59,71 +59,127 @@ def sentence_chunks_from_tokens(tokens: list[str], max_tokens: int = 28) -> list
     return out
 
 
+def piper_python_available() -> bool:
+    try:
+        return importlib.util.find_spec("piper") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def read_voice_sample_rate(voice_path: Path | str) -> int | None:
+    """Read the output sample rate from a Piper voice's `.onnx.json` config."""
+    config_path = Path(f"{voice_path}.json")
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        return int(data["audio"]["sample_rate"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 @dataclass(slots=True)
 class PiperConfig:
     voice_path: Path
     sample_rate: int = 22_050
+    backend: str = "auto"  # auto | python | cli
+
+
+class Synthesizer(Protocol):
+    def synthesize(self, text: str) -> bytes: ...
+
+    def close(self) -> None: ...
+
 
 class PiperProcess:
-    def __init__(self, cmd: list[str]):
-        # We must NOT use --output_raw because we need the WAV header to know the length
-        self.proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=0
-        )
+    """Runs the Piper CLI once per request and returns raw 16-bit PCM.
+
+    `--output_raw` is understood by both the C++ binary and the `piper-tts`
+    Python CLI, and closing stdin marks the end of the text, so the output
+    length never has to be inferred from a WAV header.
+    """
+
+    def __init__(self, cmd: list[str], timeout_s: float = _PIPER_TIMEOUT_S) -> None:
+        self.cmd = cmd
+        self.timeout_s = timeout_s
+        self.proc: subprocess.Popen[bytes] | None = None
 
     def synthesize(self, text: str) -> bytes:
-        if not self.proc.stdin or not self.proc.stdout:
+        if not text.strip():
             return b""
-            
-        payload = json.dumps({"text": text}) + "\n"
-        self.proc.stdin.write(payload.encode("utf-8"))
-        self.proc.stdin.flush()
 
-        # Read WAV header to determine chunk size (44 bytes)
-        # Note: Assumes standard PCM WAV output; parsing validated against current Piper behavior.
-        # If Piper changes header format (e.g., adds extra chunks), this could break.
-        if self.proc.poll() is not None:
-            raise RuntimeError("Piper process exited unexpectedly")
-        header = self.proc.stdout.read(44)
-        if len(header) < 44:
+        self.proc = subprocess.Popen(
+            self.cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            pcm, stderr = self.proc.communicate(
+                (text.strip() + "\n").encode("utf-8"),
+                timeout=self.timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.proc.kill()
+            self.proc.communicate()
+            raise RuntimeError("Piper synthesis timed out") from exc
+        finally:
+            proc, self.proc = self.proc, None
+
+        if proc.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip().splitlines()
+            raise RuntimeError(
+                f"Piper process exited with code {proc.returncode}"
+                + (f": {detail[-1]}" if detail else "")
+            )
+        # Guard against a trailing odd byte so the PCM stays 16-bit aligned.
+        return pcm[: len(pcm) - (len(pcm) % 2)]
+
+    def close(self) -> None:
+        proc = self.proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+
+
+_VOICE_CACHE: dict[str, Any] = {}
+_VOICE_CACHE_LOCK = threading.Lock()
+
+
+class PiperPythonSynth:
+    """In-process synthesis through the `piper-tts` package.
+
+    Loaded voices are cached per path so concurrent gRPC streams share one
+    ONNX session instead of loading the model for every connection.
+    """
+
+    def __init__(self, voice_path: Path) -> None:
+        key = str(voice_path)
+        with _VOICE_CACHE_LOCK:
+            voice = _VOICE_CACHE.get(key)
+            if voice is None:
+                from piper import PiperVoice  # type: ignore
+
+                voice = PiperVoice.load(key)
+                _VOICE_CACHE[key] = voice
+        self.voice = voice
+
+    def synthesize(self, text: str) -> bytes:
+        if not text.strip():
             return b""
-            
-        # Parse Subchunk2Size (bytes 40-43, little endian)
-        data_size = struct.unpack('<I', header[40:44])[0]
-        
-        # Read the exact amount of PCM data
-        if self.proc.poll() is not None:
-            raise RuntimeError("Piper process exited unexpectedly")
-        pcm = self.proc.stdout.read(data_size)
-        return pcm
+        # piper-tts >= 1.3 yields AudioChunk objects; older releases expose
+        # synthesize_stream_raw() yielding bytes.
+        stream_raw = getattr(self.voice, "synthesize_stream_raw", None)
+        if stream_raw is not None:
+            return b"".join(stream_raw(text))
+        return b"".join(chunk.audio_int16_bytes for chunk in self.voice.synthesize(text))
 
-class SentenceBatcher:
-    def __init__(self, max_batch_size: int = 10, max_wait_ms: int = 50):
-        self.buffer: list[str] = []
-        self.max_batch_size = max_batch_size
-        self.max_wait = max_wait_ms / 1000.0
-        self.last_flush = time.monotonic()
+    def close(self) -> None:
+        pass
 
-    def add(self, sentence: str) -> list[str] | None:
-        self.buffer.append(sentence)
 
-        if len(self.buffer) >= self.max_batch_size:
-            return self.flush()
-
-        return None
-
-    def flush(self) -> list[str] | None:
-        if not self.buffer:
-            return None
-
-        batch = self.buffer
-        self.buffer = []
-        self.last_flush = time.monotonic()
-        return batch
+def create_synthesizer(config: PiperConfig) -> Synthesizer:
+    backend = config.backend
+    if backend == "python" or (backend == "auto" and piper_python_available()):
+        return PiperPythonSynth(Path(config.voice_path))
+    return PiperProcess(["piper", "--model", str(config.voice_path), "--output_raw"])
 
 
 @dataclass(slots=True)
@@ -142,146 +198,104 @@ class PiperStreamingTTS:
         self.playback_queue = playback_queue
         self.bench = bench
         self.ingest_queue: asyncio.Queue[str | _FlushRequest] = asyncio.Queue(maxsize=32)
-        
-        self._cmd = [
-            "piper",
-            "--model", str(self.config.voice_path),
-            "--json-input"
-        ]
-        
-        self._batcher = SentenceBatcher(max_batch_size=10, max_wait_ms=50)
-        self._workers: list[asyncio.Task] = []
-        self._running = False
-        self._num_workers = 1  # Keep at 1 unless we need parallel synthesis
+        self.sample_rate = read_voice_sample_rate(config.voice_path) or config.sample_rate
 
-    async def start(self):
+        self._synth: Synthesizer | None = None
+        self._worker: asyncio.Task[None] | None = None
+        self._running = False
+        # Bumped by cancel_pending(); audio produced for an older generation is dropped.
+        self._generation = 0
+
+    async def start(self) -> None:
         if self._running:
             return
+        if self._synth is None:
+            self._synth = await asyncio.to_thread(create_synthesizer, self.config)
         self._running = True
-        self._workers = [
-            asyncio.create_task(self._tts_worker())
-            for _ in range(self._num_workers)
-        ]
+        self._worker = asyncio.create_task(self._tts_worker())
 
-    async def stop(self):
+    async def stop(self) -> None:
         if self._running:
             try:
-                await self.flush()
+                await asyncio.wait_for(self.flush(), timeout=_PIPER_TIMEOUT_S)
             except Exception:
                 logger.exception("TTS flush failed during shutdown")
         self._running = False
-        for w in self._workers:
-            w.cancel()
-        if self._workers:
-            await asyncio.gather(*self._workers, return_exceptions=True)
+        if self._worker is not None:
+            self._worker.cancel()
+            await asyncio.gather(self._worker, return_exceptions=True)
+            self._worker = None
+        if self._synth is not None:
+            self._synth.close()
 
     async def synthesize_sentence(self, sentence: str) -> bool:
-        """
-        If the system is under heavy load, synthesize_sentence() may raise RuntimeError.
-        """
+        """Queue a sentence for synthesis. Returns False if the queue stayed full."""
         if not sentence.strip():
             return True
-        
+
         try:
             await asyncio.wait_for(self.ingest_queue.put(sentence), timeout=5.0)
             return True
-        except asyncio.TimeoutError as exc:
-            logger.error("TTS ingest queue full backpressure; aborting synthesis task")
-            raise RuntimeError("TTS ingest queue full; synthesis aborted") from exc
+        except TimeoutError:
+            logger.warning("TTS ingest queue full; sentence not accepted")
+            return False
 
-    async def _tts_worker(self):
-        while self._running:
-            # 1 Piper process per worker to avoid stdout/stdin interleaving
-            piper = PiperProcess(self._cmd)
-            
+    def cancel_pending(self) -> None:
+        """Drop queued sentences and discard audio from any in-flight synthesis."""
+        self._generation += 1
+        while True:
             try:
-                while self._running:
-                    try:
-                        # Wait for sentence or timeout to flush batch
-                        timeout = max(
-                            0.01,
-                            self._batcher.max_wait
-                            - (time.monotonic() - self._batcher.last_flush),
-                        )
-                        item = await asyncio.wait_for(
-                            self.ingest_queue.get(),
-                            timeout=timeout,
-                        )
+                item = self.ingest_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self.ingest_queue.task_done()
+            if isinstance(item, _FlushRequest) and not item.done.done():
+                item.done.set_result(None)
 
-                        try:
-                            if isinstance(item, _FlushRequest):
-                                batch = self._batcher.flush()
-                                if batch:
-                                    await self._process_batch(batch, piper)
-                                if not item.done.done():
-                                    item.done.set_result(None)
-                                continue
+    async def _tts_worker(self) -> None:
+        while self._running:
+            items: list[str | _FlushRequest] = [await self.ingest_queue.get()]
+            # Coalesce sentences that are already waiting, but never wait for
+            # more: the first sentence of a reply should be spoken immediately.
+            while not isinstance(items[-1], _FlushRequest) and len(items) < _MAX_BATCH:
+                try:
+                    items.append(self.ingest_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            batch = [item for item in items if isinstance(item, str)]
+            flushes = [item for item in items if isinstance(item, _FlushRequest)]
 
-                            batch = self._batcher.add(item)
-                            if batch:
-                                await self._process_batch(batch, piper)
-                        except Exception as exc:
-                            if isinstance(item, _FlushRequest) and not item.done.done():
-                                item.done.set_exception(exc)
-                            raise
-                        finally:
-                            self.ingest_queue.task_done()
-                        
-                    except asyncio.TimeoutError:
-                        # Time to flush if buffer isn't empty
-                        batch = self._batcher.flush()
-                        if batch:
-                            await self._process_batch(batch, piper)
-                    except Exception as e:
-                        # Catch any synthesis errors (BrokenPipeError, etc.)
-                        logger.error(f"TTS worker encountered error: {e}", exc_info=True)
-                        # Attempt to flush any pending batch
-                        batch = self._batcher.flush()
-                        if batch:
-                            logger.warning(
-                                "Dropping %d sentences due to worker error",
-                                len(batch),
-                            )
-                        # Break inner loop to restart the piper process
-                        break
+            try:
+                if batch:
+                    await self._process_batch(batch)
+                for req in flushes:
+                    if not req.done.done():
+                        req.done.set_result(None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("TTS synthesis failed; dropping %d sentence(s): %s", len(batch), exc)
+                for req in flushes:
+                    if not req.done.done():
+                        req.done.set_result(None)
             finally:
-                # Ensure Piper subprocess is always terminated before potentially restarting
-                proc = getattr(piper, "proc", None)
-                if proc and proc.stdin:
-                    try:
-                        proc.stdin.close()
-                    except Exception:
-                        pass
-                if proc:
-                    try:
-                        proc.terminate()
-                        proc.wait(timeout=2)
-                    except Exception:
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                logger.info("Piper process cleaned up")
-                
-        logger.info("TTS worker stopped completely")
+                for _ in items:
+                    self.ingest_queue.task_done()
 
-    def _split_audio_chunks(self, audio_bytes: bytes, chunk_size: int = 32768):
-        for i in range(0, len(audio_bytes), chunk_size):
-            yield audio_bytes[i:i + chunk_size]
-
-    async def _process_batch(self, batch: list[str], piper: PiperProcess) -> None:
-        if not batch:
+    async def _process_batch(self, batch: list[str]) -> None:
+        if not batch or self._synth is None:
             return
-            
-        combined = " ".join(batch)
+
+        generation = self._generation
+        combined = normalize_for_speech(" ".join(batch))
+        if not combined:
+            return
         self.playback_queue.record_batch(len(batch))
-        
-        metrics = self.playback_queue.get_metrics()
-        logger.info(
-            f"TTS | ingest_q={self.ingest_queue.qsize()} "
-            f"playback_q={self.playback_queue.qsize()} "
-            f"drops={metrics['dropped_count']} "
-            f"batch={len(batch)}"
+        logger.debug(
+            "TTS | ingest_q=%d playback_q=%d batch=%d",
+            self.ingest_queue.qsize(),
+            self.playback_queue.qsize(),
+            len(batch),
         )
 
         if self.bench and self.bench.current.tts_start_ts is None:
@@ -289,47 +303,51 @@ class PiperStreamingTTS:
 
         try:
             pcm = await asyncio.wait_for(
-                asyncio.to_thread(piper.synthesize, combined),
+                asyncio.to_thread(self._synth.synthesize, combined),
                 timeout=_PIPER_TIMEOUT_S,
             )
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             logger.error("Piper synthesis timed out after %.1fs", _PIPER_TIMEOUT_S)
+            self._synth.close()
             raise RuntimeError("Piper synthesis timed out") from exc
 
-        if not pcm:
+        if not pcm or generation != self._generation:
             return
 
         if self.bench and self.bench.current.first_audio_ts is None:
             self.bench.mark("first_audio_ts")
 
-        dur_sec = len(pcm) / 2 / self.config.sample_rate
+        dur_sec = len(pcm) / 2 / self.sample_rate
         if self.bench:
             self.bench.add_synthesized_audio(dur_sec)
             self.bench.current.tts_end_ts = time.perf_counter()
 
-        chunks = list(self._split_audio_chunks(pcm))
-        for i, chunk in enumerate(chunks):
-            text_metadata = combined if i == 0 else ""
+        for i, chunk in enumerate(self._split_audio_chunks(pcm)):
+            if generation != self._generation:
+                return
             success = await safe_put(
                 self.playback_queue,
                 AudioChunk(
                     pcm16=chunk,
-                    sample_rate=self.config.sample_rate,
-                    debug_text=text_metadata,
+                    sample_rate=self.sample_rate,
+                    debug_text=combined if i == 0 else "",
                 ),
                 timeout=5.0,
             )
             if not success:
-                logger.error("TTS playback queue full backpressure; aborting synthesis task")
                 raise RuntimeError("TTS playback queue full; synthesis aborted")
 
+    @staticmethod
+    def _split_audio_chunks(audio_bytes: bytes, chunk_size: int = 8192):
+        for i in range(0, len(audio_bytes), chunk_size):
+            yield audio_bytes[i:i + chunk_size]
+
     async def flush(self) -> None:
-        """Wait until queued sentences and the in-worker batch are processed."""
-        if not self._running or not self._workers:
+        """Wait until queued sentences have been synthesized into the playback queue."""
+        if not self._running or self._worker is None:
             return
 
         loop = asyncio.get_running_loop()
         done: asyncio.Future[None] = loop.create_future()
         await self.ingest_queue.put(_FlushRequest(done))
-        await self.ingest_queue.join()
         await done

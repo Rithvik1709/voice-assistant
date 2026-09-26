@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -12,9 +11,13 @@ import sounddevice as sd
 from voice_assistant.tts.queue import AudioChunk
 
 
-@dataclass(slots=True)
-class PlaybackState:
-    interrupted: bool = False
+def resample_linear(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    if src_rate == dst_rate or len(audio) == 0:
+        return audio
+    n_out = max(1, int(round(len(audio) * dst_rate / src_rate)))
+    x_old = np.linspace(0.0, 1.0, num=len(audio), endpoint=False)
+    x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+    return np.interp(x_new, x_old, audio).astype(np.float32)
 
 
 class AudioPlayer:
@@ -23,9 +26,8 @@ class AudioPlayer:
         self.blocksize = blocksize
         self._queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=64)
         self._pending = np.array([], dtype=np.float32)
-        self.state = PlaybackState()
         self._state_lock = threading.Lock()
-        self._active = False
+        self._stream: sd.OutputStream | None = None
 
     def _callback(
         self,
@@ -35,10 +37,6 @@ class AudioPlayer:
         _status: sd.CallbackFlags,
     ) -> None:
         with self._state_lock:
-            if self.state.interrupted:
-                outdata.fill(0)
-                return
-
             pending = self._pending
 
             if len(pending) < frames:
@@ -48,30 +46,28 @@ class AudioPlayer:
                 while needed > 0:
                     try:
                         nxt = self._queue.get_nowait()
-                        parts.append(nxt)
-                        needed -= len(nxt)
                     except queue.Empty:
                         break
+                    parts.append(nxt)
+                    needed -= len(nxt)
 
-                pending = np.concatenate(parts) if parts else pending
+                pending = np.concatenate(parts)
 
-            if len(pending) == 0:
-                outdata.fill(0)
-                return
-
-            out = np.zeros((frames,), dtype=np.float32)
             take = min(frames, len(pending))
-
-            out[:take] = pending[:take]
+            outdata.fill(0)
+            if take:
+                outdata[:take, 0] = pending[:take]
             self._pending = pending[take:]
 
-        outdata[:, 0] = out
+    @property
+    def is_playing(self) -> bool:
+        """True while audio is buffered or waiting to be played."""
+        with self._state_lock:
+            return len(self._pending) > 0 or not self._queue.empty()
 
     async def start(self) -> None:
-        if self._active:
+        if self._stream is not None:
             return
-
-        self._active = True
 
         self._stream = sd.OutputStream(
             samplerate=self.sample_rate,
@@ -80,7 +76,6 @@ class AudioPlayer:
             callback=self._callback,
             blocksize=self.blocksize,
         )
-
         self._stream.start()
 
     async def play(self, chunk: AudioChunk) -> None:
@@ -88,6 +83,7 @@ class AudioPlayer:
             chunk.pcm16,
             dtype=np.int16,
         ).astype(np.float32) / 32768.0
+        audio = resample_linear(audio, chunk.sample_rate, self.sample_rate)
 
         while True:
             try:
@@ -96,25 +92,28 @@ class AudioPlayer:
             except queue.Full:
                 await asyncio.sleep(0.005)
 
-    async def stop(self) -> None:
-        self._active = False
+    async def wait_until_drained(self, poll_s: float = 0.02) -> None:
+        while self.is_playing:
+            await asyncio.sleep(poll_s)
 
-        if hasattr(self, "_stream"):
-            self._stream.stop()
-            self._stream.close()
+    async def stop(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            stream.stop()
+            stream.close()
 
     def interrupt(self) -> None:
-        with self._state_lock:
-            self.state.interrupted = True
-            self._pending = np.array([], dtype=np.float32)
+        """Immediately silence playback by discarding everything buffered.
 
-        while True:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                break
+        Playback continues normally with the next chunk passed to `play()`.
+        """
+        with self._state_lock:
+            self._pending = np.array([], dtype=np.float32)
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
 
     def resume(self) -> None:
-        with self._state_lock:
-            self.state.interrupted = False
-            
+        """Kept for API compatibility; `interrupt()` no longer latches silence."""

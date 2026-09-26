@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import statistics
 import time
 from typing import Any
 
@@ -23,7 +22,6 @@ import grpc
 
 from voice_assistant.transport import voice_assistant_pb2 as pb2
 from voice_assistant.transport import voice_assistant_pb2_grpc as pb2_grpc
-
 
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_FRAME_MS = 100
@@ -91,6 +89,9 @@ async def run_client(
 
         try:
             async for resp in call:
+                if not resp.pcm16:
+                    # Control messages (transcripts, interrupts) carry no audio.
+                    continue
                 now = time.monotonic()
                 result.audio_responses += 1
                 if result.first_response_ts is None:

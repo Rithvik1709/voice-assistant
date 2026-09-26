@@ -20,6 +20,10 @@ message AudioResponse {
   int32 sample_rate = 2;
   int64 timestamp_ms = 3;
   string debug_text = 4;
+  // Set when the user barged in: the client should drop any buffered audio.
+  bool interrupt = 5;
+  // The user's recognized utterance; sent once per turn with no audio.
+  string transcript = 6;
 }
 
 service VoiceAssistant {

@@ -45,3 +45,26 @@ def test_unknown_intent():
     assert c.classify(
         "tell me about quantum computing"
     )["intent"] == "unknown"
+
+def test_devanagari_without_keywords_is_not_a_greeting():
+    c = SimpleIntentClassifier()
+
+    res = c.classify("मुझे एक कहानी सुनाओ")
+    assert res["intent"] == "unknown"
+    assert res["lang"] == "hi"
+
+
+def test_generic_play_is_low_confidence():
+    c = SimpleIntentClassifier()
+
+    res = c.classify("how do I play chess")
+    assert res["intent"] == "play_music"
+    assert res["confidence"] < 0.5
+
+
+def test_time_and_date_intents():
+    c = SimpleIntentClassifier()
+
+    assert c.classify("What's the time?")["intent"] == "time"
+    assert c.classify("kitne baje hai")["intent"] == "time"
+    assert c.classify("what is the date today")["intent"] == "date"

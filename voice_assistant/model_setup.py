@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import sys
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -59,11 +61,13 @@ def env_template(models_dir: Path) -> str:
         'ASR_BACKEND="vosk"',
         "VAD_AGGRESSIVENESS=2",
         "CHUNK_MS=20",
-        "ASR_ENDPOINT_SILENCE_MS=60",
+        "ASR_ENDPOINT_SILENCE_MS=300",
+        "ENABLE_BARGE_IN=1",
+        "BARGE_IN_MS=240",
         "ACK_TONE_MS=55",
         "ENABLE_ACK_TONE=1",
         'VAANI_PROFILE="low_latency"',
-        'ASSISTANT_SYSTEM_PROMPT="You are Vaani, a concise voice assistant. Answer clearly in one or two short sentences unless the user asks for detail."',
+        'ASSISTANT_SYSTEM_PROMPT="You are Vaani, a concise voice assistant. Your replies are spoken aloud, so answer in one or two short plain sentences unless the user asks for detail, and never use markdown, lists, code blocks or emoji."',
         "TTS_SENTENCE_MAX_TOKENS=8",
         "TTS_EAGER_MIN_WORDS=3",
         "PLAYER_BLOCKSIZE=128",
@@ -92,6 +96,26 @@ def format_model_plan(models_dir: Path) -> str:
     return "\n".join(lines)
 
 
+def _download(url: str, target: Path, show_progress: bool = True) -> None:
+    """Download to a temporary `.part` file so an interrupted download is never
+    mistaken for a finished one on the next run."""
+    partial = target.with_name(target.name + ".part")
+    with urllib.request.urlopen(url, timeout=60) as response, partial.open("wb") as fh:
+        total = int(response.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            block = response.read(1 << 20)
+            if not block:
+                break
+            fh.write(block)
+            done += len(block)
+            if show_progress and total and sys.stderr.isatty():
+                print(f"\r  {target.name}: {done * 100 // total}% of {total >> 20} MB", end="", file=sys.stderr)
+    if show_progress and total and sys.stderr.isatty():
+        print(file=sys.stderr)
+    partial.replace(target)
+
+
 def download_recommended_models(models_dir: Path) -> list[str]:
     models_dir.mkdir(parents=True, exist_ok=True)
     messages: list[str] = []
@@ -107,12 +131,19 @@ def download_recommended_models(models_dir: Path) -> list[str]:
             messages.append(f"skip {asset.name}: {target} already exists")
             continue
 
-        urllib.request.urlretrieve(asset.url, target)
+        print(f"downloading {asset.name} ...", file=sys.stderr)
+        _download(asset.url, target)
         messages.append(f"downloaded {asset.name}: {target}")
 
         if extract_to:
+            staging = models_dir / f".{asset.extract_to}.extracting"
+            shutil.rmtree(staging, ignore_errors=True)
             with zipfile.ZipFile(target) as archive:
-                archive.extractall(models_dir)
+                archive.extractall(staging)
+            extracted = staging / asset.extract_to
+            (extracted if extracted.exists() else staging).replace(extract_to)
+            shutil.rmtree(staging, ignore_errors=True)
+            target.unlink()
             messages.append(f"extracted {asset.name}: {extract_to}")
 
     return messages

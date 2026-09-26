@@ -3,112 +3,112 @@
     "concurrency": 10,
     "clients_reported": 10,
     "first_audio_ms": {
-      "p50": 969.3154999986291,
-      "p95": 970.2972500017495,
-      "p99": 970.2972500017495
+      "p50": 961.5102909992856,
+      "p95": 964.5095829982893,
+      "p99": 964.5095829982893
     },
     "first_content_audio_ms": {
-      "p50": 1020.9399589948589,
-      "p95": 1022.4994170057471,
-      "p99": 1022.4994170057471
+      "p50": 1011.9225409998762,
+      "p95": 1012.76683299875,
+      "p99": 1012.76683299875
     },
     "last_audio_ms": {
-      "p50": 1025.6312499986961,
-      "p95": 1027.2697920008795,
-      "p99": 1027.2697920008795
+      "p50": 1017.6429580005788,
+      "p95": 1019.1542909997224,
+      "p99": 1019.1542909997224
     },
     "ack_responses": 10,
     "total_audio_responses": 30,
-    "throughput_responses_per_sec": 2.924235981647383
+    "throughput_responses_per_sec": 2.947176237489217
   },
   "clients": [
     {
-      "request_start": 51472.228966708,
-      "first_response_ts": 51473.198670041,
-      "first_content_ts": 51473.250902541,
-      "first_audio_ts": 51473.198670041,
-      "last_audio_ts": 51473.255613041,
+      "request_start": 10218.672964166,
+      "first_response_ts": 10219.637806916,
+      "first_content_ts": 10219.685936041,
+      "first_audio_ts": 10219.637806916,
+      "last_audio_ts": 10219.692255625,
       "ack_responses": 1,
       "audio_responses": 3
     },
     {
-      "request_start": 51472.229000208,
-      "first_response_ts": 51473.19837575,
-      "first_content_ts": 51473.249705916,
-      "first_audio_ts": 51473.19837575,
-      "last_audio_ts": 51473.254477833,
+      "request_start": 10218.673026166,
+      "first_response_ts": 10219.637358208,
+      "first_content_ts": 10219.685305375,
+      "first_audio_ts": 10219.637358208,
+      "last_audio_ts": 10219.691161541,
       "ack_responses": 1,
       "audio_responses": 3
     },
     {
-      "request_start": 51472.229021666,
-      "first_response_ts": 51473.199420625,
-      "first_content_ts": 51473.251521083,
-      "first_audio_ts": 51473.199420625,
-      "last_audio_ts": 51473.256291458,
+      "request_start": 10218.673062375,
+      "first_response_ts": 10219.637571958,
+      "first_content_ts": 10219.685829208,
+      "first_audio_ts": 10219.637571958,
+      "last_audio_ts": 10219.692216666,
       "ack_responses": 1,
       "audio_responses": 3
     },
     {
-      "request_start": 51472.229039958,
-      "first_response_ts": 51473.197454125,
-      "first_content_ts": 51473.248853458,
-      "first_audio_ts": 51473.197454125,
-      "last_audio_ts": 51473.25352725,
+      "request_start": 10218.673143333,
+      "first_response_ts": 10219.634716916,
+      "first_content_ts": 10219.685227333,
+      "first_audio_ts": 10219.634716916,
+      "last_audio_ts": 10219.690886291,
       "ack_responses": 1,
       "audio_responses": 3
     },
     {
-      "request_start": 51472.229056791,
-      "first_response_ts": 51473.197252875,
-      "first_content_ts": 51473.248406166,
-      "first_audio_ts": 51473.197252875,
-      "last_audio_ts": 51473.253240875,
+      "request_start": 10218.673203416,
+      "first_response_ts": 10219.634501958,
+      "first_content_ts": 10219.685040458,
+      "first_audio_ts": 10219.634501958,
+      "last_audio_ts": 10219.690567708,
       "ack_responses": 1,
       "audio_responses": 3
     },
     {
-      "request_start": 51472.2291165,
-      "first_response_ts": 51473.198133166,
-      "first_content_ts": 51473.24927,
-      "first_audio_ts": 51473.198133166,
-      "last_audio_ts": 51473.254079,
+      "request_start": 10218.673243291,
+      "first_response_ts": 10219.637421041,
+      "first_content_ts": 10219.685336041,
+      "first_audio_ts": 10219.637421041,
+      "last_audio_ts": 10219.691199916,
       "ack_responses": 1,
       "audio_responses": 3
     },
     {
-      "request_start": 51472.229134416,
-      "first_response_ts": 51473.199356458,
-      "first_content_ts": 51473.251214458,
-      "first_audio_ts": 51473.199356458,
-      "last_audio_ts": 51473.25596675,
+      "request_start": 10218.673273041,
+      "first_response_ts": 10219.634654208,
+      "first_content_ts": 10219.685160125,
+      "first_audio_ts": 10219.634654208,
+      "last_audio_ts": 10219.690807708,
       "ack_responses": 1,
       "audio_responses": 3
     },
     {
-      "request_start": 51472.229160583,
-      "first_response_ts": 51473.198476083,
-      "first_content_ts": 51473.250580125,
-      "first_audio_ts": 51473.198476083,
-      "last_audio_ts": 51473.25525525,
+      "request_start": 10218.673318666,
+      "first_response_ts": 10219.634269916,
+      "first_content_ts": 10219.684971416,
+      "first_audio_ts": 10219.634269916,
+      "last_audio_ts": 10219.690476708,
       "ack_responses": 1,
       "audio_responses": 3
     },
     {
-      "request_start": 51472.229179833,
-      "first_response_ts": 51473.199477083,
-      "first_content_ts": 51473.251821041,
-      "first_audio_ts": 51473.199477083,
-      "last_audio_ts": 51473.256683916,
+      "request_start": 10218.673350125,
+      "first_response_ts": 10219.634860416,
+      "first_content_ts": 10219.685272666,
+      "first_audio_ts": 10219.634860416,
+      "last_audio_ts": 10219.690993083,
       "ack_responses": 1,
       "audio_responses": 3
     },
     {
-      "request_start": 51472.229194416,
-      "first_response_ts": 51473.198436708,
-      "first_content_ts": 51473.250134375,
-      "first_audio_ts": 51473.198436708,
-      "last_audio_ts": 51473.254825666,
+      "request_start": 10218.673424166,
+      "first_response_ts": 10219.634634125,
+      "first_content_ts": 10219.68512275,
+      "first_audio_ts": 10219.634634125,
+      "last_audio_ts": 10219.690678666,
       "ack_responses": 1,
       "audio_responses": 3
     }

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import socket
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,16 +52,88 @@ def _audio_check() -> DoctorCheck:
     return DoctorCheck("audio_input", True, name)
 
 
+def _module_check(name: str, module: str, hint: str, required: bool = True) -> DoctorCheck:
+    try:
+        found = importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        found = False
+    if found:
+        return DoctorCheck(name, True, f"{module} importable")
+    return DoctorCheck(name, not required, f"{module} not installed ({hint})")
+
+
+def _piper_check() -> DoctorCheck:
+    from voice_assistant.tts.stream import piper_python_available
+
+    if piper_python_available():
+        return DoctorCheck("piper", True, "piper-tts Python package (in-process synthesis)")
+    binary = shutil.which("piper")
+    if binary:
+        return DoctorCheck("piper", True, f"CLI binary {binary}")
+    return DoctorCheck("piper", False, "not found: pip install piper-tts, or add the piper binary to PATH")
+
+
+def _piper_smoke_check(voice: str) -> DoctorCheck | None:
+    """Synthesize one word in a subprocess to prove Piper actually works.
+
+    Broken installs (e.g. wheels with a missing espeak-ng data path) can abort
+    the interpreter, so this must not run in-process.
+    """
+    from voice_assistant.tts.stream import piper_python_available
+
+    if not voice or not Path(voice).expanduser().exists():
+        return None
+    if piper_python_available():
+        cmd = [sys.executable, "-m", "piper"]
+    elif shutil.which("piper"):
+        cmd = ["piper"]
+    else:
+        return None
+    try:
+        proc = subprocess.run(
+            [*cmd, "--model", str(Path(voice).expanduser()), "--output_raw"],
+            input=b"test\n",
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return DoctorCheck("piper_synthesis", False, f"could not run Piper: {exc}")
+    if proc.returncode == 0 and len(proc.stdout) > 1000:
+        return DoctorCheck("piper_synthesis", True, f"synthesized {len(proc.stdout) // 2} samples")
+    err = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()
+    return DoctorCheck("piper_synthesis", False, err[-1] if err else f"no audio produced (exit {proc.returncode})")
+
+
+def _config_check(settings: Settings) -> DoctorCheck:
+    problems = settings.check_ranges()
+    if problems:
+        return DoctorCheck("config", False, "; ".join(problems))
+    barge = f"barge-in after {settings.barge_in_ms} ms" if settings.enable_barge_in else "barge-in off (half-duplex)"
+    return DoctorCheck(
+        "config",
+        True,
+        f"{settings.sample_rate} Hz, {settings.chunk_ms} ms chunks, "
+        f"{settings.asr_endpoint_silence_ms} ms endpoint, {barge}",
+    )
+
+
 def run_doctor(settings: Settings, check_audio: bool = True) -> list[DoctorCheck]:
+    local_hint = "pip install 'voice-assistant[local]'"
     checks = [
-        DoctorCheck("python_config", True, f"{settings.sample_rate} Hz, {settings.chunk_ms} ms chunks"),
+        _config_check(settings),
+        _module_check("llm_runtime", "llama_cpp", local_hint),
+        _module_check("asr_runtime", "vosk", local_hint, settings.asr_backend == "vosk"),
+        _piper_check(),
         _path_check("llm_model", settings.model_path),
         _path_check("asr_model", settings.asr_model_path, settings.asr_backend in {"vosk", "whispercpp"}),
         _path_check("piper_voice", settings.piper_voice),
         _path_check("piper_config", f"{settings.piper_voice}.json" if settings.piper_voice else ""),
-        DoctorCheck("piper_binary", shutil.which("piper") is not None, shutil.which("piper") or "not found on PATH"),
         _port_check(settings.grpc_port),
     ]
+
+    smoke = _piper_smoke_check(settings.piper_voice)
+    if smoke is not None:
+        checks.append(smoke)
 
     if check_audio:
         checks.append(_audio_check())
@@ -71,6 +146,8 @@ def format_doctor_report(checks: list[DoctorCheck]) -> str:
     for check in checks:
         marker = "OK" if check.ok else "FAIL"
         lines.append(f"[{marker}] {check.name}: {check.detail}")
+    failures = sum(1 for check in checks if not check.ok)
+    lines.append("All checks passed." if not failures else f"{failures} check(s) failed.")
     return "\n".join(lines)
 
 
