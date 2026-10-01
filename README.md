@@ -5,7 +5,10 @@ Vaani is an open-source, low-latency voice assistant that runs entirely on your 
 It can also run as a gRPC server for remote clients, or as a text chat when you have no microphone.
 
 - **Streaming everything:** speech recognition, LLM tokens, and speech synthesis overlap instead of running one after another.
-- **Barge-in:** start talking and Vaani stops mid-sentence, then answers your new question.
+- **Barge-in, even on speakers:** start talking and Vaani stops mid-sentence, then answers your new question. Echo cancellation keeps it from hearing itself.
+- **Wake word:** with `WAKE_WORD="hey vaani"`, Vaani answers only when addressed, and follow-ups need no wake word.
+- **Remembers you:** facts like your name, city and preferences are kept across sessions, on your machine.
+- **Talk from a browser:** `vaani web` serves a page that streams your voice over WebRTC.
 - **Local and open:** Qwen2.5 via llama.cpp, Whisper (or Vosk) for speech recognition, Piper for speech. No cloud APIs required, but any OpenAI-compatible server (Ollama, LM Studio, vLLM, hosted) can be plugged in for a stronger model.
 - **Fast answers for simple things:** time, date, greetings, and (optionally) live weather are answered instantly without the LLM.
 - **Speaks like a person, not a screen:** markdown, lists, code, links, and emoji are never read aloud.
@@ -22,6 +25,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in 2.0.0, including how to upg
 - [How it works](#how-it-works)
 - [Configuration](#configuration)
 - [Models](#models)
+- [Browser client](#browser-client)
 - [gRPC server and client](#grpc-server-and-client)
 - [Performance](#performance)
 - [Development](#development)
@@ -57,6 +61,7 @@ Every mode is a subcommand of `vaani` (`python -m voice_assistant.main` works to
 | --- | --- |
 | `vaani local` | Voice assistant on this machine: microphone in, speakers out |
 | `vaani chat` | Type messages and read replies; add `--speak` to also hear them |
+| `vaani web` | Talk from a browser over WebRTC (`--host`, `--port`, default `127.0.0.1:8080`) |
 | `vaani server` | gRPC server for remote clients (`--host`, `--port`) |
 | `vaani client` | Voice client for a remote server (`--target host:port`) |
 | `vaani doctor` | Check configuration, runtimes, models, port, microphone, and Piper |
@@ -68,7 +73,39 @@ Add `--log-level DEBUG` to any mode for detailed logs, and `--version` to print 
 
 With barge-in on (the default), speaking for about a quarter of a second while Vaani is talking stops its reply immediately, and your new question is answered next. What you heard of the interrupted reply stays in the conversation history.
 
-Laptop speakers feed Vaani's own voice back into the microphone, which can make it interrupt itself. Use headphones, or set `ENABLE_BARGE_IN=0`: the microphone is then muted while Vaani speaks, so it never hears itself.
+Laptop speakers feed Vaani's own voice back into the microphone. Echo cancellation removes it: everything Vaani plays is used as a reference, and WebRTC's AEC3 subtracts its echo from the microphone before speech detection sees it, so you can interrupt Vaani on speakers. It is on whenever the LiveKit SDK is installed (included in `[local]`, or `pip install -e ".[aec]"`); `vaani doctor` shows whether it is active. Set `ECHO_CANCELLATION=off` to disable it, or `on` to fail at startup if it is unavailable.
+
+Without echo cancellation, use headphones, or set `ENABLE_BARGE_IN=0`: the microphone is then muted while Vaani speaks, so it never hears itself.
+
+### Wake word
+
+By default Vaani answers everything it hears. To have it answer only when addressed, set a wake phrase:
+
+```bash
+WAKE_WORD="hey vaani, ok vaani" vaani local
+```
+
+"Hey Vaani, what's the time?" is answered; other speech is ignored. Saying just "Hey Vaani" plays a short chime and waits for your request. After the wake word, and after every reply, Vaani keeps listening for `WAKE_WORD_FOLLOW_UP_S` (8 s) so follow-up questions need no wake word. Matching is fuzzy, because Whisper may write "Hey Vani", and the wake words are passed to Whisper as hotwords so it spells them consistently.
+
+Phrase matching transcribes everything said near the microphone. To save CPU, an [openWakeWord](https://github.com/dscripka/openWakeWord) model can listen for the wake word acoustically instead, so speech recognition only runs after it fires:
+
+```bash
+pip install -e ".[wakeword]"
+WAKE_WORD_MODEL=hey_jarvis vaani local         # pretrained: alexa, hey_jarvis, hey_mycroft, hey_rhasspy
+WAKE_WORD_MODEL=models/hey_vaani.onnx vaani local   # a model you trained for "hey vaani"
+```
+
+Pretrained models are downloaded on first use. Tune `WAKE_WORD_THRESHOLD` (0.5) if it fires too often or too rarely. The wake word applies to `vaani local`.
+
+### Long-term memory
+
+With `USER_FACTS_PATH` set (`vaani models --write-env` sets `data/user_facts.json`), Vaani remembers facts about you across sessions and gives them to the LLM:
+
+- Facts are picked up as you mention them: "my name is Asha", "I live in Pune", "I'm vegetarian", "my favourite colour is green", "I love cricket", "I'm allergic to peanuts".
+- "Remember that I parked on level 2" stores anything verbatim.
+- "What do you know about me?" lists what is stored, "forget that I love cricket" removes one fact, and "forget everything about me" clears them all.
+
+Facts are found by simple rules (English and some Hinglish), not by the LLM, so it is instant and works with any model. They are stored as readable JSON on your machine, which you can edit by hand. Long-term memory works in `vaani local` and `vaani chat`; it is per machine, so the multi-client gRPC and web servers do not use it.
 
 ### Chat mode
 
@@ -103,7 +140,7 @@ ASR_MODEL_PATH=small.en vaani local   # more accurate, about 4x slower
 ASR_BACKEND=vosk ASR_MODEL_PATH=models/vosk-model-small-en-us-0.15 vaani local
 ```
 
-Whisper transcribes each utterance when you stop talking, so its decode time is added to the response and there are no live partial transcripts. Vosk streams as you speak, adds almost nothing after you stop, and supports the unfinished-sentence hold (`ASR_HOLD_SILENCE_MS`), but mishears far more. Vosk models are at [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models).
+Whisper decodes whole utterances, so Vaani runs it ahead of time. About `ASR_EARLY_DECODE_MS` (150 ms) into a pause it starts decoding what you have said so far, in the background. If you do not speak again, that transcript is used the moment the endpoint fires, so the decode time is hidden in the pause instead of being added to the response. While you speak, the utterance is also decoded every `ASR_PARTIAL_INTERVAL_MS` (1 s) for live partial transcripts. These partials also let Vaani wait longer when your words sound unfinished (`ASR_HOLD_SILENCE_MS`). Vosk streams as you speak and adds almost nothing after you stop, but mishears far more. Vosk models are at [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models).
 
 ### Mock mode
 
@@ -152,7 +189,7 @@ Time, date, weather and greeting shortcuts answer in English and Hindi only. Req
           (user speaks: cancel generation, drop queued audio)
 ```
 
-1. **Listening.** Audio arrives in 20 ms frames. WebRTC VAD finds speech, and a short pre-roll keeps the first syllable. An utterance ends after `ASR_ENDPOINT_SILENCE_MS` of silence and is transcribed by Whisper. With Vosk, frames are transcribed as they stream in, and if your last words sound unfinished ("turn on the…") Vaani waits up to `ASR_HOLD_SILENCE_MS` so it does not cut you off.
+1. **Listening.** Audio arrives in 20 ms frames, and echo cancellation removes Vaani's own voice. WebRTC VAD finds speech, and a short pre-roll keeps the first syllable. An utterance ends after `ASR_ENDPOINT_SILENCE_MS` of silence. Whisper starts decoding during the pause, so the transcript is usually ready when the endpoint fires. If your last words sound unfinished ("turn on the…"), Vaani waits up to `ASR_HOLD_SILENCE_MS` so it does not cut you off. With a wake word, only requests addressed to Vaani go on.
 2. **Understanding.** A lightweight intent classifier (English, Hindi, and Hinglish keywords) catches simple commands, which are answered directly. Everything else goes to the LLM with the recent conversation.
 3. **Thinking.** llama.cpp generates tokens in a worker thread, so listening and speaking never stall. Generation can be cancelled at the next token.
 4. **Speaking.** Tokens are cut into sentences (and short phrases, for a fast first word), cleaned of formatting, and synthesized by Piper while the LLM is still writing. A short acknowledgement tone plays the moment your question is understood.
@@ -167,8 +204,11 @@ voice_assistant/
   weather.py    Open-Meteo weather lookup
   llm/          llama.cpp and OpenAI-compatible streaming clients, speculative decoding
   tts/          Piper synthesis, speech text cleanup, playback queue, audio player
-  pipeline/     orchestrator: turns, barge-in, history, per-turn metrics
-  transport/    gRPC server, client, and protobuf definitions
+  audio/        echo cancellation, tones
+  pipeline/     orchestrator: turns, barge-in, wake word gating, history, per-turn metrics
+  transport/    gRPC server and client, WebRTC browser server and page, protobuf definitions
+  wakeword.py   wake phrase matching and openWakeWord detection
+  facts.py      long-term facts about the user
   chat.py       text chat mode
   mocks.py      stand-in models for MOCK_MODELS=1
   doctor.py     setup checks
@@ -193,8 +233,16 @@ Settings come from environment variables or a `.env` file. `vaani models --write
 | `PIPER_VOICES_DIR` | | Folder of Piper voices, one per language; the voice is picked by each reply's language |
 | `TTS_FALLBACK` | `auto` | For languages without a voice: `espeak`, `default` (the default voice), `none`, or `auto` (espeak-ng if installed, else the default voice) |
 | `ASR_ENDPOINT_SILENCE_MS` | `400` | Silence that ends an utterance. Lower is snappier but may cut sentences at natural pauses. |
-| `ASR_HOLD_SILENCE_MS` | `1000` | Longer silence allowed when your words so far end on "and", "the", "um" and similar (Vosk only) |
+| `ASR_HOLD_SILENCE_MS` | `1000` | Longer silence allowed when your words so far end on "and", "the", "um" and similar |
+| `ASR_EARLY_DECODE_MS` | `150` | Whisper: start decoding this far into a pause, so the transcript is ready at the endpoint (`0` disables) |
+| `ASR_PARTIAL_INTERVAL_MS` | `1000` | Whisper: decode this often while you speak, for live partial transcripts (`0` disables) |
 | `ENABLE_BARGE_IN` | `1` | Let speech interrupt Vaani; `0` mutes the mic while it speaks |
+| `ECHO_CANCELLATION` | `auto` | Remove Vaani's voice from the mic so barge-in works on speakers: `auto` (on when installed), `on`, `off` |
+| `AEC_NOISE_SUPPRESSION` | `1` | Also suppress steady background noise while cancelling echo |
+| `WAKE_WORD` | | Answer only utterances starting with one of these comma-separated phrases, e.g. `hey vaani, ok vaani` |
+| `WAKE_WORD_MODEL` | | openWakeWord model (pretrained name or `.onnx`/`.tflite` path) that listens for the wake word acoustically |
+| `WAKE_WORD_THRESHOLD` | `0.5` | openWakeWord detection threshold |
+| `WAKE_WORD_FOLLOW_UP_S` | `8` | Seconds after the wake word or a reply during which no wake word is needed |
 | `BARGE_IN_MS` | `240` | How long you must speak before Vaani stops |
 | `VAD_AGGRESSIVENESS` | `2` | Speech detection strictness, 0 (lenient) to 3 (strict) |
 | `CHUNK_MS` | `20` | Audio frame size: 10, 20 or 30 |
@@ -205,6 +253,7 @@ Settings come from environment variables or a `.env` file. `vaani models --write
 | `N_GPU_LAYERS` | `-1` | Layers offloaded to the GPU (`-1` is all) |
 | `CONVERSATION_HISTORY_TURNS` | `10` | Turns kept in the LLM context |
 | `CONVERSATION_MEMORY_PATH` | | JSONL file that remembers the conversation across sessions |
+| `USER_FACTS_PATH` | | JSON file of long-term facts about you (see [Long-term memory](#long-term-memory)) |
 | `ENABLE_ACK_TONE` / `ACK_TONE_MS` | `1` / `55` | Short tone when your question is understood |
 | `ENABLE_WEATHER` | `0` | Live weather from [Open-Meteo](https://open-meteo.com) (free, no key). Off by default because it sends the city name over the internet. |
 | `WEATHER_DEFAULT_CITY` | | City used when a weather question names none |
@@ -240,9 +289,24 @@ pip install -e ".[local]"          # model runtimes: llama.cpp, Whisper, Vosk, P
 pip install -e .                   # core only: mock mode, gRPC server, benchmarks
 pip install -e ".[local,cuda]"     # llama.cpp with CUDA
 pip install -e ".[local,metal]"    # llama.cpp with Metal (Apple Silicon)
+pip install -e ".[aec]"            # echo cancellation only (already in [local])
+pip install -e ".[wakeword]"       # openWakeWord acoustic wake word
+pip install -e ".[webrtc]"         # browser client (vaani web)
 pip install -e ".[otel]"           # OpenTelemetry trace export
-pip install -e ".[all]"            # everything, including Silero VAD and WebRTC
+pip install -e ".[all]"            # everything, including Silero VAD
 ```
+
+## Browser client
+
+`vaani web` serves a web page you can talk to from the browser. Your voice is streamed to Vaani over WebRTC, its reply streams back as audio, and the page shows the conversation, with live transcripts while you speak:
+
+```bash
+pip install -e ".[webrtc]"
+vaani web                     # then open http://localhost:8080
+MOCK_MODELS=1 vaani web       # try it without models
+```
+
+The browser's own echo cancellation is used, so barge-in works on speakers. Each tab gets its own conversation, and all tabs share the loaded models. The server listens on `127.0.0.1` by default. Browsers only allow the microphone on `localhost` or HTTPS, so to use it from another device, run it with `--host 0.0.0.0` behind an HTTPS reverse proxy. Anyone who can reach the port can talk to it.
 
 ## gRPC server and client
 
@@ -300,7 +364,8 @@ CI runs lint and tests on Python 3.11 and 3.12, checks the protobuf stubs match 
 Start with `vaani doctor`: it names the failing piece and how to fix it.
 
 - **`piper_synthesis` fails with an espeak-ng `phontab` error.** Some `piper-tts` wheels for Apple Silicon ship with a broken espeak-ng data path, so Piper cannot speak at all. Install the official Piper binary and put it on `PATH`, then `pip uninstall piper-tts` so Vaani uses the binary. Or run Vaani on Linux.
-- **Vaani keeps interrupting itself.** Its voice is reaching the microphone. Use headphones or set `ENABLE_BARGE_IN=0`.
+- **Vaani keeps interrupting itself.** Its voice is reaching the microphone. Check that `vaani doctor` shows `echo_cancellation` on (`pip install -e ".[aec]"`), lower the speaker volume, or raise `BARGE_IN_MS`. Otherwise, use headphones or set `ENABLE_BARGE_IN=0`.
+- **The wake word is missed or ignored.** Run with `--log-level DEBUG` to see what Whisper heard, and add that spelling as another phrase (`WAKE_WORD="hey vaani, hey vani"`). With `WAKE_WORD_MODEL`, lower `WAKE_WORD_THRESHOLD`.
 - **Sentences get cut off halfway.** Raise `ASR_ENDPOINT_SILENCE_MS`, for example to 500.
 - **Vaani mishears you.** Use a larger Whisper model (`ASR_MODEL_PATH=small.en`), and check `vaani doctor` shows the right microphone.
 - **Answers are shallow or wrong.** Use a bigger model, locally or through `LLM_BACKEND=openai`.
@@ -313,11 +378,10 @@ Start with `vaani doctor`: it names the failing piece and how to fix it.
 
 ## Roadmap
 
-- Wake word, so Vaani listens only when called
-- Echo cancellation for barge-in on laptop speakers
+- A pretrained "hey vaani" openWakeWord model
 - Music and smart-home actions
 - Translated replies for the time, date and weather shortcuts
-- WebRTC transport for browser clients
+- Echo cancellation for the gRPC client
 
 ## License
 

@@ -104,6 +104,12 @@ def env_template(models_dir: Path, languages: Sequence[str] = ()) -> str:
         "PLAYER_BLOCKSIZE=128",
         "GRPC_PORT=50051",
         'CONVERSATION_MEMORY_PATH="data/session.jsonl"',
+        'USER_FACTS_PATH="data/user_facts.json"',
+        'ECHO_CANCELLATION="auto"',
+        "ASR_EARLY_DECODE_MS=150",
+        "ASR_PARTIAL_INTERVAL_MS=1000",
+        "# Answer only when addressed, e.g. \"hey vaani, ok vaani\"",
+        'WAKE_WORD=""',
     ]
     if multilingual:
         lines += [

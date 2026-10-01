@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Echo cancellation.** Vaani's own voice is removed from the microphone with WebRTC's AEC3 (through the LiveKit SDK), using everything it plays as the reference, so barge-in works on laptop speakers without headphones. `ECHO_CANCELLATION` is `auto` (on when installed), `on` or `off`. It is in the `[local]` extra, or `[aec]` on its own.
+- **Wake word.** `WAKE_WORD="hey vaani"` answers only requests that start with the phrase (fuzzy-matched, and given to Whisper as hotwords). Saying just the wake word plays a chime and waits for the request, and follow-ups within `WAKE_WORD_FOLLOW_UP_S` need no wake word. `WAKE_WORD_MODEL` listens acoustically with openWakeWord instead (`[wakeword]` extra), so speech recognition only runs after the wake word.
+- **Long-term memory.** With `USER_FACTS_PATH`, facts you mention ("my name is…", "I live in…", "I'm vegetarian", "I love cricket") are kept across sessions in a local JSON file and added to the system prompt. "Remember that…", "what do you know about me?", "forget that…" and "forget everything about me" manage them.
+- **Browser client.** `vaani web` serves a page that streams your voice to Vaani over WebRTC and plays its reply, with the conversation and live transcripts on screen (`[webrtc]` extra). It replaces the unused WebRTC stub.
+- **Faster Whisper turns and live transcripts.** Whisper starts decoding `ASR_EARLY_DECODE_MS` (150 ms) into a pause, and the endpoint reuses that result when you did not speak again, so the decode no longer adds to the response time. Periodic decodes (`ASR_PARTIAL_INTERVAL_MS`) give live partial transcripts, which also make the unfinished-sentence hold (`ASR_HOLD_SILENCE_MS`) work with Whisper.
+- `vaani doctor` reports echo cancellation, the wake word and long-term memory.
+
 - **Multilingual conversations.** `ASR_LANGUAGE=auto` detects the language of every utterance with Whisper (99 languages), asks the LLM to reply in it, and speaks the reply with that language's Piper voice. `ASR_LANGUAGES` limits detection to the languages you speak.
 - `PIPER_VOICES_DIR`: a folder of Piper voices, one per language, loaded on first use. `PIPER_VOICE` stays the default voice.
 - `TTS_FALLBACK` for languages without a Piper voice: espeak-ng, the default voice, or silence.

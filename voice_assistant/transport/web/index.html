@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vaani</title>
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --panel: #ffffff;
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --line: #e4e2dc;
+    --accent: #c2410c;
+    --accent-text: #ffffff;
+    --user: #1d1d1f;
+    --user-text: #ffffff;
+    --ok: #15803d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413;
+      --panel: #1f1f1d;
+      --text: #f1f0ec;
+      --muted: #a1a09a;
+      --line: #33322e;
+      --accent: #f97316;
+      --accent-text: #141413;
+      --user: #f1f0ec;
+      --user-text: #141413;
+      --ok: #4ade80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex;
+    justify-content: center;
+  }
+  main {
+    width: 100%;
+    max-width: 640px;
+    padding: 24px 16px;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: -0.01em; }
+  #status { color: var(--muted); font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  #status::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--line);
+  }
+  #status.live::before { background: var(--ok); }
+  #log {
+    flex: 1;
+    margin: 20px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+  }
+  .empty { color: var(--muted); margin: auto; text-align: center; max-width: 340px; }
+  .msg {
+    max-width: 85%;
+    padding: 10px 14px;
+    border-radius: 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .msg.user { align-self: flex-end; background: var(--user); color: var(--user-text); border-color: transparent; }
+  .msg.partial { opacity: 0.6; font-style: italic; }
+  .msg.cut::after { content: " …"; color: var(--muted); }
+  footer { display: flex; align-items: center; gap: 16px; }
+  #talk {
+    border: 0;
+    border-radius: 999px;
+    padding: 14px 26px;
+    font: inherit;
+    font-weight: 600;
+    background: var(--accent);
+    color: var(--accent-text);
+    cursor: pointer;
+    min-width: 168px;
+  }
+  #talk:disabled { opacity: 0.6; cursor: default; }
+  #talk:focus-visible { outline: 3px solid var(--text); outline-offset: 2px; }
+  #meter { flex: 1; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  #level { height: 100%; width: 0; background: var(--ok); transition: width 80ms linear; }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Vaani</h1>
+    <div id="status" role="status">Not connected</div>
+  </header>
+  <section id="log" aria-live="polite">
+    <p class="empty" id="empty">Press <strong>Start talking</strong>, allow the microphone, and speak. Talk over Vaani at any time to interrupt.</p>
+  </section>
+  <footer>
+    <button id="talk" type="button">Start talking</button>
+    <div id="meter" aria-hidden="true"><div id="level"></div></div>
+  </footer>
+  <p class="hint">Audio is processed by your own Vaani server.</p>
+</main>
+<audio id="voice" autoplay></audio>
+<script>
+const talk = document.getElementById("talk");
+const statusEl = document.getElementById("status");
+const log = document.getElementById("log");
+const level = document.getElementById("level");
+const voice = document.getElementById("voice");
+
+let pc = null, stream = null, meterStop = null;
+let partialEl = null, replyEl = null;
+
+function setStatus(text, live) {
+  statusEl.textContent = text;
+  statusEl.classList.toggle("live", !!live);
+}
+
+function bubble(cls, text) {
+  document.getElementById("empty")?.remove();
+  const el = document.createElement("div");
+  el.className = "msg " + cls;
+  el.textContent = text;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+function onEvent(msg) {
+  if (msg.type === "partial") {
+    if (!partialEl) partialEl = bubble("user partial", "");
+    partialEl.textContent = msg.text;
+  } else if (msg.type === "transcript") {
+    if (partialEl) { partialEl.remove(); partialEl = null; }
+    bubble("user", msg.text);
+    replyEl = null;
+  } else if (msg.type === "reply") {
+    if (!replyEl) replyEl = bubble("assistant", msg.text);
+    else replyEl.textContent += " " + msg.text;
+    log.scrollTop = log.scrollHeight;
+  } else if (msg.type === "interrupt") {
+    if (replyEl) replyEl.classList.add("cut");
+    replyEl = null;
+  }
+}
+
+function startMeter(mediaStream) {
+  const ctx = new AudioContext();
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  ctx.createMediaStreamSource(mediaStream).connect(analyser);
+  const data = new Uint8Array(analyser.fftSize);
+  let raf = 0;
+  const tick = () => {
+    analyser.getByteTimeDomainData(data);
+    let peak = 0;
+    for (const v of data) peak = Math.max(peak, Math.abs(v - 128));
+    level.style.width = Math.min(100, peak / 64 * 100) + "%";
+    raf = requestAnimationFrame(tick);
+  };
+  tick();
+  return () => { cancelAnimationFrame(raf); ctx.close(); level.style.width = "0"; };
+}
+
+function waitForIce(peer) {
+  if (peer.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise(resolve => {
+    const check = () => {
+      if (peer.iceGatheringState === "complete") {
+        peer.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      }
+    };
+    peer.addEventListener("icegatheringstatechange", check);
+  });
+}
+
+async function start() {
+  talk.disabled = true;
+  setStatus("Asking for the microphone…");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+    });
+  } catch (err) {
+    setStatus("Microphone blocked: " + err.message);
+    talk.disabled = false;
+    return;
+  }
+  setStatus("Connecting…");
+  pc = new RTCPeerConnection();
+  const channel = pc.createDataChannel("events");
+  channel.onmessage = e => onEvent(JSON.parse(e.data));
+  pc.ontrack = e => { voice.srcObject = e.streams[0] || new MediaStream([e.track]); };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "connected") setStatus("Listening", true);
+    if (["failed", "disconnected", "closed"].includes(pc.connectionState)) stop("Disconnected");
+  };
+  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+  meterStop = startMeter(stream);
+
+  try {
+    await pc.setLocalDescription(await pc.createOffer());
+    await waitForIce(pc);
+    const res = await fetch("/offer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+    });
+    if (!res.ok) throw new Error("server returned " + res.status);
+    await pc.setRemoteDescription(await res.json());
+  } catch (err) {
+    stop("Could not connect: " + err.message);
+    return;
+  }
+  talk.textContent = "Stop";
+  talk.disabled = false;
+}
+
+function stop(message) {
+  if (meterStop) { meterStop(); meterStop = null; }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  if (pc) { const p = pc; pc = null; p.close(); }
+  voice.srcObject = null;
+  setStatus(message || "Not connected");
+  talk.textContent = "Start talking";
+  talk.disabled = false;
+}
+
+talk.addEventListener("click", () => (pc ? stop() : start()));
+</script>
+</body>
+</html>

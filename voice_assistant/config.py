@@ -43,6 +43,16 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _env_switch(name: str, default: str) -> str:
+    """An "auto"/"on"/"off" setting; boolean spellings are accepted."""
+    raw = (os.getenv(name) or default).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return "on"
+    if raw in {"0", "false", "no", "off"}:
+        return "off"
+    return raw
+
+
 def mock_models_enabled() -> bool:
     return os.getenv("MOCK_MODELS") == "1"
 
@@ -60,6 +70,12 @@ class Settings:
     asr_endpoint_silence_ms: int = field(default_factory=lambda: _env_int("ASR_ENDPOINT_SILENCE_MS", 400))
     # Longer silence allowed when the words so far look unfinished ("and ...", "the ...").
     asr_hold_silence_ms: int = field(default_factory=lambda: _env_int("ASR_HOLD_SILENCE_MS", 1000))
+    # Whisper: start decoding this long into a pause, so the transcript is
+    # usually ready when the endpoint fires instead of starting then. 0 disables.
+    asr_early_decode_ms: int = field(default_factory=lambda: _env_int("ASR_EARLY_DECODE_MS", 150))
+    # Whisper: decode the utterance so far this often while the user speaks,
+    # for live partial transcripts. 0 disables.
+    asr_partial_interval_ms: int = field(default_factory=lambda: _env_int("ASR_PARTIAL_INTERVAL_MS", 1000))
     ack_tone_ms: int = field(default_factory=lambda: _env_int("ACK_TONE_MS", 55))
     enable_ack_tone: bool = field(default_factory=lambda: _env_bool("ENABLE_ACK_TONE", True))
 
@@ -68,6 +84,11 @@ class Settings:
     # be disabled; the microphone is then muted while the assistant speaks.
     enable_barge_in: bool = field(default_factory=lambda: _env_bool("ENABLE_BARGE_IN", True))
     barge_in_ms: int = field(default_factory=lambda: _env_int("BARGE_IN_MS", 240))
+    # Echo cancellation removes the assistant's voice from the microphone, so
+    # barge-in works on speakers: "auto" (on when the LiveKit SDK is
+    # installed), "on" or "off".
+    echo_cancellation: str = field(default_factory=lambda: _env_switch("ECHO_CANCELLATION", "auto"))
+    aec_noise_suppression: bool = field(default_factory=lambda: _env_bool("AEC_NOISE_SUPPRESSION", True))
 
     # "llama" runs a local GGUF file in-process; "openai" talks to any
     # OpenAI-compatible server (Ollama, LM Studio, vLLM, llama.cpp server, hosted APIs).
@@ -119,6 +140,20 @@ class Settings:
         default_factory=lambda: _env_int("CONVERSATION_HISTORY_TURNS", 10)
     )
     conversation_memory_path: str = field(default_factory=lambda: os.getenv("CONVERSATION_MEMORY_PATH", ""))
+    # Long-term facts about the user ("my name is ...", "remember that ..."),
+    # kept across sessions and added to the system prompt. Empty disables.
+    user_facts_path: str = field(default_factory=lambda: os.getenv("USER_FACTS_PATH", ""))
+
+    # Wake word: answer only utterances starting with one of these phrases
+    # (comma-separated, e.g. "hey vaani, ok vaani"). Empty disables.
+    wake_word: str = field(default_factory=lambda: os.getenv("WAKE_WORD", ""))
+    # An openWakeWord model (a pretrained name such as "hey_jarvis", or a
+    # .onnx/.tflite path) that listens for the wake word acoustically, so
+    # speech recognition only runs after it fires.
+    wake_word_model: str = field(default_factory=lambda: os.getenv("WAKE_WORD_MODEL", ""))
+    wake_word_threshold: float = field(default_factory=lambda: _env_float("WAKE_WORD_THRESHOLD", 0.5))
+    # After the wake word or a reply, listen this long without needing it again.
+    wake_word_follow_up_s: float = field(default_factory=lambda: _env_float("WAKE_WORD_FOLLOW_UP_S", 8.0))
 
     # Live weather via Open-Meteo. Off by default: it contacts the internet.
     enable_weather: bool = field(default_factory=lambda: _env_bool("ENABLE_WEATHER", False))
@@ -164,6 +199,10 @@ class Settings:
                 f"ASR_HOLD_SILENCE_MS ({self.asr_hold_silence_ms}) must be at least "
                 f"ASR_ENDPOINT_SILENCE_MS ({self.asr_endpoint_silence_ms})"
             )
+        if self.asr_early_decode_ms < 0:
+            problems.append(f"ASR_EARLY_DECODE_MS must be 0 (off) or positive, got {self.asr_early_decode_ms}")
+        if self.asr_partial_interval_ms < 0:
+            problems.append(f"ASR_PARTIAL_INTERVAL_MS must be 0 (off) or positive, got {self.asr_partial_interval_ms}")
         if self.asr_backend not in {"vosk", "whisper", "whispercpp"}:
             problems.append(f"ASR_BACKEND must be 'vosk', 'whisper' or 'whispercpp', got {self.asr_backend!r}")
         problems.extend(self._language_problems())
@@ -177,8 +216,16 @@ class Settings:
             problems.append(f"LLM_TEMPERATURE must be between 0 and 2, got {self.llm_temperature}")
         if self.sentence_max_tokens <= 0:
             problems.append(f"TTS_SENTENCE_MAX_TOKENS must be positive, got {self.sentence_max_tokens}")
+        if self.echo_cancellation not in {"auto", "on", "off"}:
+            problems.append(f"ECHO_CANCELLATION must be 'auto', 'on' or 'off', got {self.echo_cancellation!r}")
         if self.barge_in_ms < self.chunk_ms:
             problems.append(f"BARGE_IN_MS must be at least one chunk ({self.chunk_ms}ms), got {self.barge_in_ms}")
+        if not 0.0 < self.wake_word_threshold < 1.0:
+            problems.append(f"WAKE_WORD_THRESHOLD must be between 0 and 1, got {self.wake_word_threshold}")
+        if self.wake_word_follow_up_s < 0:
+            problems.append(f"WAKE_WORD_FOLLOW_UP_S must not be negative, got {self.wake_word_follow_up_s}")
+        if self.wake_word.strip() and not self.wake_phrases:
+            problems.append(f"WAKE_WORD has no words in it: {self.wake_word!r}")
         if self.weather_units.lower() not in {"celsius", "fahrenheit"}:
             problems.append(f"WEATHER_UNITS must be 'celsius' or 'fahrenheit', got {self.weather_units!r}")
         if not 0 < self.grpc_port < 65536:
@@ -306,6 +353,36 @@ class Settings:
 
             weather = OpenMeteoWeather(unit=self.weather_units)
         return BasicIntentActions(weather=weather, default_city=self.weather_default_city)
+
+    @property
+    def wake_phrases(self) -> tuple[str, ...]:
+        from voice_assistant.wakeword import parse_wake_phrases
+
+        return parse_wake_phrases(self.wake_word)
+
+    def build_wake_gate(self):
+        """The wake word gate, or None when no wake word is configured."""
+        if not self.wake_phrases and not self.wake_word_model:
+            return None
+        from voice_assistant.wakeword import WakeWordGate
+
+        return WakeWordGate(self.wake_phrases, follow_up_s=self.wake_word_follow_up_s)
+
+    def build_wake_detector(self):
+        """The acoustic wake word detector, or None without WAKE_WORD_MODEL."""
+        if not self.wake_word_model:
+            return None
+        from voice_assistant.wakeword import OpenWakeWordDetector
+
+        return OpenWakeWordDetector(self.wake_word_model, threshold=self.wake_word_threshold)
+
+    def build_facts(self):
+        """Long-term user facts, or None without USER_FACTS_PATH."""
+        if not self.user_facts_path:
+            return None
+        from voice_assistant.facts import UserFacts
+
+        return UserFacts(Path(self.user_facts_path).expanduser())
 
     @property
     def barge_in_frames(self) -> int:

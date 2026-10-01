@@ -32,7 +32,7 @@ jobs:
       - name: Install Package and Dev Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,webrtc,aec]"
 
       - name: Lint
         run: ruff check voice_assistant tests scripts
@@ -41,6 +41,9 @@ jobs:
         run: python scripts/check_proto_stubs.py
 
       - name: Unit Tests
+        env:
+          # Includes the end-to-end WebRTC test (local sockets only).
+          VAANI_NETWORK_TESTS: "1"
         run: pytest -q
 
   performance:

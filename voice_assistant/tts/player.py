@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import queue
 import threading
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -10,6 +12,7 @@ import sounddevice as sd
 
 from voice_assistant.tts.queue import AudioChunk
 
+logger = logging.getLogger(__name__)
 
 def resample_linear(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     if src_rate == dst_rate or len(audio) == 0:
@@ -21,9 +24,17 @@ def resample_linear(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarr
 
 
 class AudioPlayer:
-    def __init__(self, sample_rate: int = 22_050, blocksize: int = 128) -> None:
+    def __init__(
+        self,
+        sample_rate: int = 22_050,
+        blocksize: int = 128,
+        on_output: Callable[[np.ndarray, int], None] | None = None,
+    ) -> None:
         self.sample_rate = sample_rate
         self.blocksize = blocksize
+        # Receives every block sent to the speakers, silence included (the
+        # echo canceller's reference signal). Runs on the audio thread.
+        self.on_output = on_output
         self._queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=64)
         self._pending = np.array([], dtype=np.float32)
         self._state_lock = threading.Lock()
@@ -58,6 +69,12 @@ class AudioPlayer:
             if take:
                 outdata[:take, 0] = pending[:take]
             self._pending = pending[take:]
+
+        if self.on_output is not None:
+            try:
+                self.on_output(outdata[:, 0].copy(), self.sample_rate)
+            except Exception:  # never let it break playback
+                logger.exception("Playback observer failed")
 
     @property
     def is_playing(self) -> bool:

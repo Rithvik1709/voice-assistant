@@ -21,3 +21,8 @@ def make_ack_tone(sample_rate: int, duration_ms: int, frequency_hz: float = 880.
         .astype(np.int16)
         .tobytes()
     )
+
+
+def make_wake_tone(sample_rate: int) -> bytes:
+    """Two rising notes: "I'm listening" after the wake word."""
+    return make_ack_tone(sample_rate, 70, 660.0) + make_ack_tone(sample_rate, 90, 990.0)

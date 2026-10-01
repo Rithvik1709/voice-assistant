@@ -4,7 +4,7 @@ import asyncio
 import logging
 import signal
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import grpc
@@ -46,8 +46,13 @@ FALLBACK_REPLY = "Sorry, something went wrong. Please try again."
 # Per-stream session
 # =====================================================================
 
-class _VoiceSession:
-    """State and tasks for one StreamVoice call."""
+class VoiceSession:
+    """One conversation over a network audio stream (a gRPC call or a WebRTC peer).
+
+    Audio goes in through `feed`; everything to send back (audio, transcripts,
+    interruptions) comes out of `responses` as AudioResponse messages, with
+    None marking the end.
+    """
 
     def __init__(self, service: VoiceAssistantService) -> None:
         self.service = service
@@ -83,6 +88,8 @@ class _VoiceSession:
             endpoint_silence_ms=self.settings.asr_endpoint_silence_ms,
             speech_start_frames=self.settings.barge_in_frames,
             hold_silence_ms=self.settings.asr_hold_silence_ms,
+            early_decode_ms=self.settings.asr_early_decode_ms,
+            partial_interval_ms=self.settings.asr_partial_interval_ms,
             language=self.settings.asr_language,
             recognizer=recognizer,
         )
@@ -107,6 +114,8 @@ class _VoiceSession:
         # tells the client to drop whatever it still has buffered.
         self.sent_audio = False
         self.pending_frame = bytearray()
+        # Called with live partial transcripts while the user speaks.
+        self.on_partial: Callable[[str], None] | None = None
 
     # ----- lifecycle -------------------------------------------------
 
@@ -119,6 +128,7 @@ class _VoiceSession:
         if self.pump_task is not None:
             self.pump_task.cancel()
             await asyncio.gather(self.pump_task, return_exceptions=True)
+        self.asr.close()
         await self.tts.stop()
 
     # ----- input -----------------------------------------------------
@@ -147,6 +157,10 @@ class _VoiceSession:
     async def _handle_event(self, event: ASREvent) -> None:
         if event.type == "speech_start":
             self.barge_in()
+            return
+        if event.type == "partial":
+            if self.on_partial is not None and event.text.strip():
+                self.on_partial(event.text.strip())
             return
         if event.type != "final" or not event.text.strip():
             return
@@ -326,7 +340,7 @@ class VoiceAssistantService(pb2_grpc.VoiceAssistantServicer):
     async def StreamVoice(
         self, request_iterator: AsyncIterator[pb2.AudioChunk], context: grpc.aio.ServicerContext
     ) -> AsyncIterator[pb2.AudioResponse]:
-        session = _VoiceSession(self)
+        session = VoiceSession(self)
         await session.start()
 
         async def read_requests() -> None:

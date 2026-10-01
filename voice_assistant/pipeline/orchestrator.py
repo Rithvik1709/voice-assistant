@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from voice_assistant.asr.stream import ASREvent, StreamingASR
+    from voice_assistant.facts import UserFacts
     from voice_assistant.tts.player import AudioPlayer
+    from voice_assistant.wakeword import WakeWordGate
 
 from opentelemetry import trace
 
 from voice_assistant.actions import ActionHandler
-from voice_assistant.audio import make_ack_tone
+from voice_assistant.audio import make_ack_tone, make_wake_tone
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.lang import CLAUSE_CHARS, SENTENCE_END_CHARS, count_words, with_reply_language
 from voice_assistant.llm.client import StreamingLLMClient
@@ -69,6 +71,8 @@ class VoicePipelineOrchestrator:
         on_reply_token: Callable[[str], None] | None = None,
         on_turn_end: Callable[[], None] | None = None,
         reply_in_user_language: bool = False,
+        wake_gate: WakeWordGate | None = None,
+        facts: UserFacts | None = None,
     ) -> None:
         self.asr = asr
         self.llm = llm
@@ -94,6 +98,10 @@ class VoicePipelineOrchestrator:
         self.action_handler = action_handler
         self.memory = memory
         self.system_prompt = system_prompt.strip()
+        # Only utterances addressed to the assistant are answered.
+        self.wake_gate = wake_gate
+        # Long-term facts about the user, added to the system prompt.
+        self.facts = facts
 
         self.max_conversation_turns = max(1, max_conversation_turns)
         self.conversation_history = self._load_conversation_history()
@@ -116,6 +124,11 @@ class VoicePipelineOrchestrator:
 
     async def asr_task(self) -> None:
         async for event in self.asr.stream_events():
+            if event.type == "wake":
+                logger.info("Wake word heard")
+                await self._enqueue_wake_tone()
+                continue
+
             if event.type == "speech_start":
                 if self.barge_in and self._responding:
                     logger.info("Barge-in detected; interrupting response")
@@ -127,17 +140,41 @@ class VoicePipelineOrchestrator:
                 continue
 
             if event.type == "final" and event.text.strip():
+                text: str | None = event.text.strip()
+                if self.wake_gate is not None:
+                    text = await self._addressed(text)
+                    if text is None:
+                        continue
                 if event.language:
-                    logger.info("User (%s): %s", event.language, event.text)
+                    logger.info("User (%s): %s", event.language, text)
                 else:
-                    logger.info("User: %s", event.text)
+                    logger.info("User: %s", text)
                 self.bench.reset()
                 if event.speech_end_ts is not None:
                     self.bench.current.speech_end_ts = event.speech_end_ts
                 self.bench.mark("final_text_ts")
-                await self.prompt_queue.put((event.text, event.language))
+                await self.prompt_queue.put((text, event.language))
+
+    async def _addressed(self, text: str) -> str | None:
+        """The request in `text` if it is meant for the assistant, else None."""
+        gate = self.wake_gate
+        assert gate is not None
+        rest = gate.match(text)
+        if rest == "":
+            # Just the wake word: listen for the request.
+            logger.info("Wake word heard")
+            gate.wake()
+            await self._enqueue_wake_tone()
+            return None
+        if rest is not None:
+            return rest
+        if gate.awake or self._responding:
+            return text
+        logger.debug("Ignoring speech without the wake word: %s", text)
+        return None
 
     def _offer_partial(self, event: ASREvent) -> None:
+        logger.debug("Hearing: %s", event.text)
         # Keep the queue non-blocking and prefer the freshest partials.
         if self.partial_queue.full():
             try:
@@ -194,6 +231,14 @@ class VoicePipelineOrchestrator:
             self._reply_tokens = []
 
             try:
+                if self.facts is not None:
+                    command_reply = await asyncio.to_thread(self._learn_facts, prompt)
+                    self._refresh_system_message()
+                    if command_reply:
+                        await self._emit_text_response(command_reply)
+                        self._add_message("assistant", command_reply)
+                        return
+
                 if intent is not None and self.action_handler is not None:
                     # Actions may do network I/O (weather), so keep them off the loop.
                     action_result = await asyncio.to_thread(self.action_handler.handle, prompt, intent)
@@ -340,11 +385,16 @@ class VoicePipelineOrchestrator:
         self._responding = True
         if not self.barge_in:
             self.asr.muted = True
+        if self.wake_gate is not None:
+            self.wake_gate.hold()
         return self._turn
 
     def _end_response(self) -> None:
         self._responding = False
         self.asr.muted = False
+        if self.wake_gate is not None:
+            # A follow-up question does not need the wake word.
+            self.wake_gate.wake()
 
     def _schedule_finish(self, turn: int) -> None:
         if turn != self._turn:
@@ -396,10 +446,35 @@ class VoicePipelineOrchestrator:
 
         self.conversation_history = system_messages[:1] + chat_messages
 
+    def _system_content(self) -> str:
+        facts = self.facts.prompt_section() if self.facts is not None else ""
+        return "\n\n".join(part for part in (self.system_prompt, facts) if part)
+
+    def _refresh_system_message(self) -> None:
+        """Rebuild the system message, e.g. after new facts were learned."""
+        content = self._system_content()
+        history = self.conversation_history
+        if history and history[0].get("role") == "system":
+            if content:
+                history[0] = {"role": "system", "content": content}
+            else:
+                del history[0]
+        elif content:
+            history.insert(0, {"role": "system", "content": content})
+
+    def _learn_facts(self, prompt: str) -> str | None:
+        """Answer a memory command, or remember facts stated in `prompt`."""
+        assert self.facts is not None
+        reply = self.facts.handle_command(prompt)
+        if reply is None:
+            self.facts.observe(prompt)
+        return reply
+
     def _load_conversation_history(self) -> list[dict[str, str]]:
         history = []
-        if self.system_prompt:
-            history.append({"role": "system", "content": self.system_prompt})
+        system = self._system_content()
+        if system:
+            history.append({"role": "system", "content": system})
 
         if self.memory is None:
             return history
@@ -459,6 +534,10 @@ class VoicePipelineOrchestrator:
             word_count >= self.tts_eager_min_words
             and boundary
         )
+
+    async def _enqueue_wake_tone(self) -> None:
+        pcm16 = make_wake_tone(self.player.sample_rate)
+        await safe_put(self.audio_queue, AudioChunk(pcm16=pcm16, sample_rate=self.player.sample_rate))
 
     async def _enqueue_ack_tone(self) -> None:
         sr = self.player.sample_rate
