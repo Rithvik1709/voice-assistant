@@ -6,6 +6,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import AsyncIterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,13 +64,24 @@ def looks_unfinished(text: str) -> bool:
 
 @dataclass(slots=True)
 class ASREvent:
-    type: str  # speech_start | partial | final
+    type: str  # speech_start | partial | final | wake
     text: str
     confidence: float
     timestamp_ms: int
     speech_end_ts: float | None = None
     # Language the user spoke (e.g. "hi"), when known.
     language: str | None = None
+
+
+@dataclass(slots=True)
+class _Snapshot:
+    """A decode of the utterance so far, running ahead of the endpoint."""
+
+    future: Future
+    # The audio-clock time of the last speech frame it contains. If no speech
+    # follows, it holds the whole utterance and the endpoint can reuse it.
+    speech_audio: float
+    reported: bool = False
 
 
 class _VoskRecognizer:
@@ -173,6 +185,7 @@ class _FasterWhisperRecognizer:
         language: str = "en",
         whisper_model: Any | None = None,
         allowed_languages: tuple[str, ...] = (),
+        hotwords: str = "",
     ) -> None:
         if whisper_model is None:
             try:
@@ -193,6 +206,8 @@ class _FasterWhisperRecognizer:
         # None asks Whisper to detect the language.
         self.language: str | None = None if detect else language
         self.last_language: str | None = self.language
+        # Words Whisper should prefer when unsure, such as the wake word "Vaani".
+        self.hotwords = hotwords or None
 
     def accept_waveform(self, audio_bytes: bytes) -> None:
         pass
@@ -201,8 +216,19 @@ class _FasterWhisperRecognizer:
         return "", 0.0
 
     def final_result(self, utterance: bytes) -> tuple[str, float]:
+        text, confidence, language = self.decode(utterance)
+        if text:
+            self.last_language = language
+        return text, confidence
+
+    def decode(self, utterance: bytes) -> tuple[str, float, str | None]:
+        """Transcribe `utterance` without changing any state: (text, confidence, language).
+
+        Safe to call from another thread while audio is still arriving, which
+        is how StreamingASR decodes ahead of the endpoint.
+        """
         if not utterance:
-            return "", 0.0
+            return "", 0.0, self.language
         audio = np.frombuffer(utterance, dtype=np.int16).astype(np.float32) / 32768.0
         segments, info = self._transcribe(audio, self.language)
         language = self.language
@@ -216,9 +242,7 @@ class _FasterWhisperRecognizer:
         kept = [seg for seg in segments if seg.no_speech_prob < self.NO_SPEECH_THRESHOLD]
         text = " ".join(seg.text.strip() for seg in kept).strip()
         confidence = float(np.exp(np.mean([seg.avg_logprob for seg in kept]))) if kept else 0.0
-        if text:
-            self.last_language = language
-        return text, confidence
+        return text, confidence, language
 
     def _transcribe(self, audio: np.ndarray, language: str | None) -> tuple[Any, Any]:
         return self.model.transcribe(
@@ -228,6 +252,7 @@ class _FasterWhisperRecognizer:
             vad_filter=False,  # Vaani's VAD already cut the utterance
             condition_on_previous_text=False,
             without_timestamps=True,
+            hotwords=self.hotwords,
         )
 
     def _likeliest_allowed(self, info: Any) -> str:
@@ -245,13 +270,19 @@ def load_recognizer(
     language: str = "en",
     shared: Any = None,
     allowed_languages: tuple[str, ...] = (),
+    hotwords: str = "",
 ) -> Any:
     """Create the recognizer for `backend`, optionally reusing a loaded model."""
     if backend == "vosk":
         return _VoskRecognizer(model_path, sample_rate, model=shared)
     if backend == "whisper":
         return _FasterWhisperRecognizer(
-            model_path, sample_rate, language=language, whisper_model=shared, allowed_languages=allowed_languages
+            model_path,
+            sample_rate,
+            language=language,
+            whisper_model=shared,
+            allowed_languages=allowed_languages,
+            hotwords=hotwords,
         )
     if backend == "whispercpp":
         return _WhisperCppRecognizer(model_path, sample_rate)
@@ -272,8 +303,20 @@ class StreamingASR:
         hold_silence_ms: int | None = None,
         language: str = "en",
         allowed_languages: tuple[str, ...] = (),
+        early_decode_ms: int = 0,
+        partial_interval_ms: int = 0,
+        hotwords: str = "",
+        echo_canceller: Any | None = None,
+        wake_detector: Any | None = None,
+        wake_gate: Any | None = None,
     ) -> None:
         self.sample_rate = sample_rate
+        # Removes the assistant's own voice from microphone frames.
+        self.echo_canceller = echo_canceller
+        # While `wake_gate` is asleep, audio only goes to `wake_detector`
+        # (an acoustic wake word model); recognition starts once it fires.
+        self.wake_detector = wake_detector if wake_gate is not None else None
+        self.wake_gate = wake_gate
         self.chunk_size = chunk_size
         self.vad = vad
         self.backend = backend
@@ -309,8 +352,27 @@ class StreamingASR:
         self.language = None if language == AUTO else language
 
         self._rec = recognizer if recognizer is not None else load_recognizer(
-            backend, model_path, sample_rate, language=language, allowed_languages=allowed_languages
+            backend,
+            model_path,
+            sample_rate,
+            language=language,
+            allowed_languages=allowed_languages,
+            hotwords=hotwords,
         )
+
+        # Recognizers that decode a whole utterance at once (Whisper) can be
+        # run ahead of the endpoint: once the user pauses, the utterance so
+        # far is decoded in the background, and if they do not speak again
+        # the endpoint reuses that result instead of starting a decode.
+        # During long speech, periodic decodes give live partial transcripts.
+        can_decode_early = not self._rec.streaming and callable(getattr(self._rec, "decode", None))
+        self.early_decode_s = early_decode_ms / 1000.0 if can_decode_early and early_decode_ms > 0 else None
+        self.partial_interval_s = (
+            partial_interval_ms / 1000.0 if can_decode_early and partial_interval_ms > 0 else None
+        )
+        self._executor: ThreadPoolExecutor | None = None
+        self._snapshot: _Snapshot | None = None
+        self._last_snapshot_audio = 0.0
 
     def _mic_callback(
         self,
@@ -343,9 +405,18 @@ class StreamingASR:
         self._speech_start_sent = False
         self._consecutive_speech = 0
         self._last_partial = ""
+        self._latest_words = ""
+        self._drop_snapshot()
         self._stabilizer = PartialTranscriptStabilizer()
         self.vad.reset()
         self._rec.reset()
+
+    def close(self) -> None:
+        """Stop the background decoder thread."""
+        self._drop_snapshot()
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
 
     @property
     def in_utterance(self) -> bool:
@@ -356,6 +427,10 @@ class StreamingASR:
         if len(frame) != self.vad.frame_bytes:
             return []
 
+        if self.echo_canceller is not None:
+            # Even while muted, so its reference stays aligned with the microphone.
+            frame = self.echo_canceller.process(frame)
+
         self._audio_clock += self._frame_s
         now_ms = int(time.time() * 1000)
         events: list[ASREvent] = []
@@ -363,6 +438,14 @@ class StreamingASR:
         if self.muted:
             if self._in_speech or self._speech_buffer:
                 self.reset()
+            return events
+
+        if self.wake_detector is not None and not self._in_speech and not self.wake_gate.awake:
+            if self.wake_detector.detect(frame):
+                self.wake_gate.wake()
+                self._preroll.clear()
+                self.vad.reset()
+                events.append(ASREvent("wake", "", 1.0, now_ms))
             return events
 
         speech = self.vad.is_speech(frame)
@@ -373,6 +456,7 @@ class StreamingASR:
                 self._preroll.append(frame)
                 return events
             self._in_speech = True
+            self._last_snapshot_audio = self._audio_clock
             for early in self._preroll:
                 self._feed(early)
             self._preroll.clear()
@@ -395,13 +479,71 @@ class StreamingASR:
                 if stable and stable != self._last_partial:
                     self._last_partial = stable
                     events.append(ASREvent("partial", stable, conf, now_ms))
+            elif self.partial_interval_s is not None:
+                self._collect_snapshot(events, now_ms)
+                idle = self._snapshot is None or self._snapshot.future.done()
+                if idle and self._audio_clock - self._last_snapshot_audio >= self.partial_interval_s:
+                    self._take_snapshot()
             return events
 
+        silence = self._audio_clock - self._last_speech_audio
+        if self.early_decode_s is not None or self.partial_interval_s is not None:
+            # A finished decode tells the endpoint what was said so far, so the
+            # longer hold for unfinished sentences works with Whisper too.
+            self._collect_snapshot(events, now_ms)
+        if (
+            self.early_decode_s is not None
+            and silence >= self.early_decode_s
+            and (self._snapshot is None or self._snapshot.speech_audio != self._last_speech_audio)
+        ):
+            self._take_snapshot()
+
         # The epsilon keeps float drift in the frame clock from ending a frame early.
-        if self._audio_clock - self._last_speech_audio > self._required_silence() + 1e-6:
+        if silence > self._required_silence() + 1e-6:
             events.extend(self.finalize())
 
         return events
+
+    def _take_snapshot(self) -> None:
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vaani-asr-early")
+        # A decode that has not started yet is superseded by this one.
+        self._drop_snapshot()
+        future = self._executor.submit(self._rec.decode, bytes(self._speech_buffer))
+        self._snapshot = _Snapshot(future, self._last_speech_audio)
+        self._last_snapshot_audio = self._audio_clock
+
+    def _drop_snapshot(self) -> None:
+        if self._snapshot is not None:
+            self._snapshot.future.cancel()
+            self._snapshot = None
+
+    def _collect_snapshot(self, events: list[ASREvent], now_ms: int) -> None:
+        snap = self._snapshot
+        if snap is None or snap.reported or not snap.future.done() or snap.future.cancelled():
+            return
+        snap.reported = True
+        if snap.future.exception() is not None:
+            logger.debug("Early decode failed", exc_info=snap.future.exception())
+            return
+        text, conf, language = snap.future.result()
+        text = text.strip()
+        if text and text != self._last_partial:
+            self._latest_words = text
+            self._last_partial = text
+            events.append(ASREvent("partial", text, conf, now_ms, language=language or self.language))
+
+    def _snapshot_result(self) -> tuple[str, float, str | None] | None:
+        """The early decode, if it covers the whole utterance (no speech after it)."""
+        snap = self._snapshot
+        if snap is None or snap.speech_audio != self._last_speech_audio or snap.future.cancelled():
+            return None
+        try:
+            # Usually already finished; otherwise it has a head start on a fresh decode.
+            return snap.future.result()
+        except Exception:
+            logger.debug("Early decode failed; decoding again", exc_info=True)
+            return None
 
     def _required_silence(self) -> float:
         if looks_unfinished(self._latest_words):
@@ -412,7 +554,14 @@ class StreamingASR:
         """End the current utterance now (e.g. when the audio stream closes)."""
         events: list[ASREvent] = []
         if self._in_speech:
-            final_text, conf = self._rec.final_result(bytes(self._speech_buffer))
+            early = self._snapshot_result()
+            if early is not None:
+                final_text, conf, language = early
+                if final_text.strip() and language and hasattr(self._rec, "last_language"):
+                    self._rec.last_language = language
+            else:
+                final_text, conf = self._rec.final_result(bytes(self._speech_buffer))
+                language = getattr(self._rec, "last_language", None)
             if final_text.strip():
                 events.append(
                     ASREvent(
@@ -421,7 +570,7 @@ class StreamingASR:
                         conf,
                         int(time.time() * 1000),
                         speech_end_ts=self._last_speech_ts,
-                        language=getattr(self._rec, "last_language", None) or self.language,
+                        language=language or self.language,
                     )
                 )
         self.reset()

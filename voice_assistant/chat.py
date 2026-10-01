@@ -170,6 +170,7 @@ def build_chat(
         on_reply_token=printer.token,
         on_turn_end=turn_end,
         reply_in_user_language=settings.multilingual,
+        facts=settings.build_facts(),
     )
 
     def command(text: str) -> None:

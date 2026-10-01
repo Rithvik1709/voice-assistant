@@ -175,6 +175,44 @@ def _language_checks(settings: Settings) -> list[DoctorCheck]:
     return checks
 
 
+def _echo_cancellation_check(settings: Settings) -> DoctorCheck:
+    from voice_assistant.audio.aec import echo_cancellation_available
+
+    if settings.echo_cancellation == "off":
+        return DoctorCheck("echo_cancellation", True, "off (use headphones for barge-in)")
+    if echo_cancellation_available():
+        return DoctorCheck("echo_cancellation", True, "on (WebRTC AEC3): barge-in works on speakers")
+    hint = "livekit not installed (pip install 'voice-assistant[aec]')"
+    if settings.echo_cancellation == "on":
+        return DoctorCheck("echo_cancellation", False, hint)
+    return DoctorCheck("echo_cancellation", True, f"off: {hint}; use headphones for barge-in")
+
+
+def _wake_word_checks(settings: Settings) -> list[DoctorCheck]:
+    if not settings.wake_phrases and not settings.wake_word_model:
+        return []
+    checks = []
+    if settings.wake_phrases:
+        phrases = ", ".join(f'"{p}"' for p in settings.wake_phrases)
+        checks.append(DoctorCheck("wake_word", True, f"{phrases}, {settings.wake_word_follow_up_s:g} s follow-up"))
+    model = settings.wake_word_model
+    if model:
+        checks.append(_module_check("wake_word_runtime", "openwakeword", "pip install 'voice-assistant[wakeword]'"))
+        if model.endswith((".onnx", ".tflite")):
+            checks.append(_path_check("wake_word_model", model))
+        else:
+            checks.append(DoctorCheck("wake_word_model", True, f"pretrained openWakeWord model {model!r}"))
+    return checks
+
+
+def _user_facts_check(settings: Settings) -> DoctorCheck:
+    if not settings.user_facts_path:
+        return DoctorCheck("user_facts", True, "off (set USER_FACTS_PATH to remember facts across sessions)")
+    facts = settings.build_facts()
+    count = len(facts.facts) + len(facts.likes) + len(facts.dislikes) + len(facts.allergies) + len(facts.notes)
+    return DoctorCheck("user_facts", True, f"{settings.user_facts_path} ({count} remembered)")
+
+
 def _config_check(settings: Settings) -> DoctorCheck:
     problems = settings.check_ranges()
     if problems:
@@ -217,6 +255,9 @@ def run_doctor(settings: Settings, check_audio: bool = True) -> list[DoctorCheck
             required=not settings.piper_voices_dir,
         ),
         *_language_checks(settings),
+        _echo_cancellation_check(settings),
+        *_wake_word_checks(settings),
+        _user_facts_check(settings),
         _port_check(settings.grpc_port),
     ]
 

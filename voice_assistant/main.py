@@ -9,7 +9,7 @@ from pathlib import Path
 from voice_assistant import __version__
 from voice_assistant.config import ConfigError, Settings
 
-MODES = ["local", "chat", "server", "client", "doctor", "models"]
+MODES = ["local", "chat", "web", "server", "client", "doctor", "models"]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -17,8 +17,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--mode", choices=MODES, default=None, help="What to run (default: local)")
     p.add_argument("mode_arg", nargs="?", choices=MODES, metavar="MODE", help="Same as --mode: " + ", ".join(MODES))
-    p.add_argument("--host", default="0.0.0.0", help="gRPC server bind address")
-    p.add_argument("--port", type=int, default=None, help="gRPC server port (default: GRPC_PORT or 50051)")
+    p.add_argument("--host", default=None, help="bind address (default: 0.0.0.0 for server, 127.0.0.1 for web)")
+    p.add_argument("--port", type=int, default=None, help="port (default: GRPC_PORT or 50051 for server, 8080 for web)")
     p.add_argument("--target", default="localhost:50051", help="gRPC server address for client mode")
     p.add_argument("--speak", action="store_true", help="chat: also speak replies through Piper")
     p.add_argument("--skip-audio-check", action="store_true", help="doctor: skip the microphone check")
@@ -49,6 +49,7 @@ async def run_local(settings: Settings) -> None:
     # Local-only imports to avoid requiring sounddevice when running in server mode
     from voice_assistant.asr.stream import StreamingASR
     from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
+    from voice_assistant.audio.aec import create_echo_canceller
     from voice_assistant.benchmark import BenchmarkTracker
     from voice_assistant.llm import create_llm
     from voice_assistant.llm.client import warm_up_llm
@@ -60,6 +61,15 @@ async def run_local(settings: Settings) -> None:
     from voice_assistant.tts.stream import PiperStreamingTTS
 
     bench = BenchmarkTracker()
+    aec = create_echo_canceller(
+        settings.echo_cancellation, settings.sample_rate, noise_suppression=settings.aec_noise_suppression
+    )
+    if aec is None and settings.enable_barge_in:
+        logging.getLogger(__name__).info(
+            "Without echo cancellation Vaani can hear itself on speakers; use headphones or ENABLE_BARGE_IN=0"
+        )
+    wake_gate = settings.build_wake_gate()
+    wake_detector = settings.build_wake_detector()
     vad = VoiceActivityDetector(
         VADConfig(
             sample_rate=settings.sample_rate,
@@ -77,9 +87,15 @@ async def run_local(settings: Settings) -> None:
         endpoint_silence_ms=settings.asr_endpoint_silence_ms,
         speech_start_frames=settings.barge_in_frames,
         hold_silence_ms=settings.asr_hold_silence_ms,
+        early_decode_ms=settings.asr_early_decode_ms,
+        partial_interval_ms=settings.asr_partial_interval_ms,
         language=settings.asr_language,
         allowed_languages=settings.asr_languages,
         model_path=settings.whisper_model() if settings.asr_backend == "whisper" else settings.asr_model_path,
+        echo_canceller=aec,
+        wake_detector=wake_detector,
+        wake_gate=wake_gate,
+        hotwords=wake_gate.hotwords() if wake_gate is not None else "",
     )
 
     llm = create_llm(settings, bench=bench)
@@ -93,6 +109,7 @@ async def run_local(settings: Settings) -> None:
     player = AudioPlayer(
         sample_rate=tts.sample_rate,
         blocksize=settings.player_blocksize,
+        on_output=aec.push_playback if aec is not None else None,
     )
     memory = (
         SessionMemory(Path(settings.conversation_memory_path).expanduser())  # noqa: ASYNC240
@@ -116,7 +133,12 @@ async def run_local(settings: Settings) -> None:
         max_conversation_turns=settings.conversation_history_turns,
         barge_in=settings.enable_barge_in,
         reply_in_user_language=settings.multilingual,
+        wake_gate=wake_gate,
+        facts=settings.build_facts(),
     )
+    if wake_gate is not None:
+        names = [p.title() for p in settings.wake_phrases] or [wake_detector.name.replace("_", " ").title()]
+        logging.getLogger(__name__).info("Say \"%s\" to talk to Vaani", names[0])
     await warm_up_llm(llm, settings.assistant_system_prompt)
     await orchestrator.run()
 
@@ -159,7 +181,7 @@ async def amain(args: argparse.Namespace) -> None:
                 print(message)
         return
 
-    if args.mode in {"local", "server"}:
+    if args.mode in {"local", "server", "web"}:
         settings.validate()
 
     if args.mode == "chat":
@@ -176,7 +198,14 @@ async def amain(args: argparse.Namespace) -> None:
     if args.mode == "server":
         from voice_assistant.transport.grpc_server import serve
 
-        await serve(args.host, args.port if args.port is not None else settings.grpc_port, settings)
+        await serve(args.host or "0.0.0.0", args.port if args.port is not None else settings.grpc_port, settings)
+        return
+
+    if args.mode == "web":
+        from voice_assistant.transport.webrtc import require_webrtc, serve_web
+
+        require_webrtc()
+        await serve_web(args.host or "127.0.0.1", args.port if args.port is not None else 8080, settings)
         return
 
     if args.mode == "client":
@@ -194,6 +223,12 @@ def main(argv: list[str] | None = None) -> None:
         print("\n[Vaani] Shutting down...")
     except ConfigError as exc:
         # Configuration problems: show the message, not a traceback.
+        print(f"[Vaani] {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
+    except RuntimeError as exc:
+        # Missing optional packages ("pip install ...") are reported plainly.
+        if "pip install" not in str(exc):
+            raise
         print(f"[Vaani] {exc}", file=sys.stderr)
         raise SystemExit(2) from None
 
