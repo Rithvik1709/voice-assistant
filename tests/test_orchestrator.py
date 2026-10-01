@@ -59,6 +59,7 @@ class FakeTTS:
     def __init__(self) -> None:
         self.playback_queue = AudioChunkQueue(maxsize=8)
         self.sentences: list[str] = []
+        self.languages: list[str | None] = []
         self.cancelled = 0
         self.sample_rate = 22050
 
@@ -68,8 +69,9 @@ class FakeTTS:
     async def stop(self) -> None:
         pass
 
-    async def synthesize_sentence(self, sentence: str) -> bool:
+    async def synthesize_sentence(self, sentence: str, language: str | None = None) -> bool:
         self.sentences.append(sentence)
+        self.languages.append(language)
         return True
 
     def cancel_pending(self) -> None:

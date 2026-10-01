@@ -7,6 +7,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from voice_assistant.lang import AUTO, LANGUAGE_NAMES, parse_language_list
+
 load_dotenv()
 
 
@@ -76,12 +78,26 @@ class Settings:
     model_path: str = field(default_factory=lambda: os.getenv("MODEL_PATH", ""))
     draft_model_path: str = field(default_factory=lambda: os.getenv("DRAFT_MODEL_PATH", ""))
     piper_voice: str = field(default_factory=lambda: os.getenv("PIPER_VOICE", ""))
+    # A folder of Piper voices, one per language, picked by the language of
+    # each reply. PIPER_VOICE stays the default voice.
+    piper_voices_dir: str = field(default_factory=lambda: os.getenv("PIPER_VOICES_DIR", ""))
+    # What speaks a language that has no Piper voice: "espeak" (espeak-ng,
+    # robotic but 100+ languages), "default" (the default voice), "none"
+    # (stay silent), or "auto" (espeak-ng when installed, else the default voice).
+    tts_fallback: str = field(default_factory=lambda: os.getenv("TTS_FALLBACK", "auto").strip().lower())
     asr_model_path: str = field(default_factory=lambda: os.getenv("ASR_MODEL_PATH", ""))
 
     # vosk: fast, streaming partials, weaker accuracy. whisper: faster-whisper,
     # far more accurate, transcribes each utterance at the endpoint.
     asr_backend: str = field(default_factory=lambda: os.getenv("ASR_BACKEND", "whisper").strip().lower())
-    asr_language: str = field(default_factory=lambda: os.getenv("ASR_LANGUAGE", "en"))
+    # A language code ("en", "hi", "ta") or "auto" to detect it on every
+    # utterance; replies then follow the language the user spoke.
+    asr_language: str = field(default_factory=lambda: os.getenv("ASR_LANGUAGE", "en").strip().lower() or "en")
+    # With "auto": the languages detection may choose from. Short utterances
+    # are easily misdetected, so listing the expected ones helps a lot.
+    asr_languages: tuple[str, ...] = field(
+        default_factory=lambda: parse_language_list(os.getenv("ASR_LANGUAGES", ""))
+    )
     quant_level: str = field(default_factory=lambda: os.getenv("QUANT_LEVEL", "Q4_K_M"))
     n_gpu_layers: int = field(default_factory=lambda: _env_int("N_GPU_LAYERS", -1))
 
@@ -150,6 +166,7 @@ class Settings:
             )
         if self.asr_backend not in {"vosk", "whisper", "whispercpp"}:
             problems.append(f"ASR_BACKEND must be 'vosk', 'whisper' or 'whispercpp', got {self.asr_backend!r}")
+        problems.extend(self._language_problems())
         if self.llm_backend not in {"llama", "openai"}:
             problems.append(f"LLM_BACKEND must be 'llama' or 'openai', got {self.llm_backend!r}")
         if self.llm_max_tokens <= 0:
@@ -168,6 +185,29 @@ class Settings:
             problems.append(f"GRPC_PORT must be a valid TCP port, got {self.grpc_port}")
         return problems
 
+    def _language_problems(self) -> list[str]:
+        problems: list[str] = []
+        if self.asr_language != AUTO and self.asr_language not in LANGUAGE_NAMES:
+            problems.append(f"ASR_LANGUAGE must be 'auto' or a language code such as 'en' or 'hi', got {self.asr_language!r}")
+        unknown = [code for code in self.asr_languages if code not in LANGUAGE_NAMES]
+        if unknown:
+            problems.append(f"ASR_LANGUAGES has unknown language codes: {', '.join(unknown)}")
+        if self.asr_language == AUTO and self.asr_backend != "whisper":
+            problems.append(f"ASR_LANGUAGE=auto needs ASR_BACKEND=whisper; {self.asr_backend} models know one language")
+        if self.asr_backend == "whisper" and self.asr_language != "en" and self.asr_model_path.rstrip("/").endswith(".en"):
+            problems.append(
+                f"ASR_MODEL_PATH {self.asr_model_path!r} is an English-only Whisper model; "
+                "use a multilingual one (e.g. large-v3-turbo or small) for other languages"
+            )
+        if self.tts_fallback not in {"auto", "espeak", "default", "none"}:
+            problems.append(f"TTS_FALLBACK must be 'auto', 'espeak', 'default' or 'none', got {self.tts_fallback!r}")
+        return problems
+
+    @property
+    def multilingual(self) -> bool:
+        """Whether replies may be in a language other than English."""
+        return self.asr_language != "en"
+
     def validate(self, need_asr: bool = True, need_tts: bool = True) -> None:
         problems = self.check_ranges()
         if problems:
@@ -180,7 +220,7 @@ class Settings:
             required = {"LLM_BASE_URL": self.llm_base_url, "LLM_MODEL": self.llm_model}
         else:
             required = {"MODEL_PATH": self.model_path}
-        if need_tts:
+        if need_tts and not self.piper_voices_dir:
             required["PIPER_VOICE"] = self.piper_voice
         # Whisper takes a size name ("base.en") or a directory and has a default.
         if need_asr and self.asr_backend in {"vosk", "whispercpp"}:
@@ -194,10 +234,13 @@ class Settings:
                 "Run `vaani models --write-env --download` to fetch the open starter models."
             )
 
+        paths = {k: v for k, v in required.items() if k not in {"LLM_BASE_URL", "LLM_MODEL"}}
+        if need_tts:
+            paths.update({"PIPER_VOICE": self.piper_voice, "PIPER_VOICES_DIR": self.piper_voices_dir})
         missing_paths = [
             f"{name}={value}"
-            for name, value in required.items()
-            if name not in {"LLM_BASE_URL", "LLM_MODEL"} and value and not Path(value).expanduser().exists()
+            for name, value in paths.items()
+            if value and not Path(value).expanduser().exists()
         ]
         if missing_paths:
             raise ConfigError(
@@ -216,15 +259,42 @@ class Settings:
                 "the Piper binary to PATH."
             )
 
-        piper_config = Path(f"{self.piper_voice}.json").expanduser()
-        if not piper_config.exists():
-            raise ConfigError(
-                f"Missing Piper voice config file: {piper_config}"
-            )
+        if self.piper_voice:
+            piper_config = Path(f"{self.piper_voice}.json").expanduser()
+            if not piper_config.exists():
+                raise ConfigError(
+                    f"Missing Piper voice config file: {piper_config}"
+                )
+
+        if self.piper_voices_dir:
+            from voice_assistant.tts.voices import discover_voices
+
+            if not discover_voices(Path(self.piper_voices_dir).expanduser()):
+                raise ConfigError(
+                    f"PIPER_VOICES_DIR {self.piper_voices_dir} has no Piper voices "
+                    "(each needs a .onnx file and its .onnx.json config)"
+                )
 
     @property
     def piper_voice_path(self) -> Path:
         return Path(self.piper_voice).expanduser().resolve()
+
+    def piper_config(self):
+        """TTS settings: the default voice, the per-language voices and the fallback."""
+        from voice_assistant.tts.stream import PiperConfig
+
+        return PiperConfig(
+            self.piper_voice_path if self.piper_voice else None,
+            self.tts_sample_rate,
+            voices_dir=Path(self.piper_voices_dir).expanduser() if self.piper_voices_dir else None,
+            fallback=self.tts_fallback,
+        )
+
+    def whisper_model(self) -> str:
+        """The Whisper model to load: ASR_MODEL_PATH, or a default that knows the language."""
+        from voice_assistant.asr.stream import default_whisper_model
+
+        return self.asr_model_path or default_whisper_model(self.asr_language)
 
     def build_actions(self):
         """Intent actions configured from these settings."""

@@ -15,17 +15,29 @@ from pathlib import Path
 from voice_assistant.asr.stream import ASREvent
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.config import Settings, mock_models_enabled
+from voice_assistant.lang import AUTO, guess_language
 from voice_assistant.tts.queue import AudioChunkQueue
 
 HELP = "Type a message and press Enter. Commands: /reset forgets the conversation, /quit exits."
 
 
 class TextInput:
-    """ASR stand-in that yields each typed line as a final transcript."""
+    """ASR stand-in that yields each typed line as a final transcript.
 
-    def __init__(self, read_line: Callable[[str], str] = input, prompt: str = "You: ") -> None:
+    `language` is reported on every line; with "auto" it is guessed from the
+    writing system (Tamil script is Tamil), and unknown for shared scripts
+    such as Latin.
+    """
+
+    def __init__(
+        self,
+        read_line: Callable[[str], str] = input,
+        prompt: str = "You: ",
+        language: str | None = None,
+    ) -> None:
         self.read_line = read_line
         self.prompt = prompt
+        self.language = language
         self.muted = False
         self.ready = asyncio.Event()
         self.ready.set()
@@ -49,7 +61,8 @@ class TextInput:
                     self.on_command(text.lower())
                 continue
             self.ready.clear()
-            yield ASREvent("final", text, 1.0, int(time.time() * 1000))
+            language = guess_language(text) if self.language == AUTO else self.language
+            yield ASREvent("final", text, 1.0, int(time.time() * 1000), language=language)
 
 
 class ReplyPrinter:
@@ -86,7 +99,7 @@ class SilentTTS:
     async def stop(self) -> None:
         pass
 
-    async def synthesize_sentence(self, sentence: str) -> bool:
+    async def synthesize_sentence(self, sentence: str, language: str | None = None) -> bool:
         return True
 
     def cancel_pending(self) -> None:
@@ -127,7 +140,7 @@ def build_chat(
     from voice_assistant.nlu import SimpleIntentClassifier
     from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
 
-    text_input = TextInput(read_line=read_line)
+    text_input = TextInput(read_line=read_line, language=settings.asr_language)
     printer = ReplyPrinter(out)
 
     def turn_end() -> None:
@@ -156,6 +169,7 @@ def build_chat(
         barge_in=True,
         on_reply_token=printer.token,
         on_turn_end=turn_end,
+        reply_in_user_language=settings.multilingual,
     )
 
     def command(text: str) -> None:
@@ -180,10 +194,10 @@ async def run_chat(settings: Settings, speak: bool = False) -> None:
     tts = player = None
     if speak and not mock_models_enabled():
         from voice_assistant.tts.player import AudioPlayer
-        from voice_assistant.tts.stream import PiperConfig, PiperStreamingTTS
+        from voice_assistant.tts.stream import PiperStreamingTTS
 
         tts = PiperStreamingTTS(
-            PiperConfig(settings.piper_voice_path, settings.tts_sample_rate),
+            settings.piper_config(),
             playback_queue=AudioChunkQueue(maxsize=settings.tts_queue_maxsize),
         )
         player = AudioPlayer(sample_rate=tts.sample_rate, blocksize=settings.player_blocksize)

@@ -14,12 +14,13 @@ from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
 from voice_assistant.audio import make_ack_tone
 from voice_assistant.benchmark import BenchmarkTracker
 from voice_assistant.config import Settings, mock_models_enabled
+from voice_assistant.lang import ends_sentence, with_reply_language
 from voice_assistant.llm import create_llm
 from voice_assistant.llm.client import warm_up_llm
 from voice_assistant.mocks import MockLLMClient, MockPiperStreamingTTS, MockRecognizer  # noqa: F401 (re-exported)
 from voice_assistant.nlu import SimpleIntentClassifier
 from voice_assistant.tts.queue import AudioChunkQueue
-from voice_assistant.tts.stream import PiperConfig, PiperStreamingTTS, sentence_chunks_from_tokens
+from voice_assistant.tts.stream import PiperStreamingTTS, sentence_chunks_from_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ class _VoiceSession:
             self.settings.sample_rate,
             language=self.settings.asr_language,
             shared=service.asr_model,
+            allowed_languages=self.settings.asr_languages,
         )
         self.asr = StreamingASR(
             sample_rate=self.settings.sample_rate,
@@ -90,7 +92,7 @@ class _VoiceSession:
             self.tts: Any = MockPiperStreamingTTS(None, self.tts_queue, bench=self.bench)
         else:
             self.tts = PiperStreamingTTS(
-                PiperConfig(self.settings.piper_voice_path, self.settings.tts_sample_rate),
+                self.settings.piper_config(),
                 playback_queue=self.tts_queue,
                 bench=self.bench,
             )
@@ -99,6 +101,8 @@ class _VoiceSession:
         self.responses: asyncio.Queue[pb2.AudioResponse | None] = asyncio.Queue()
         self.response_task: asyncio.Task[None] | None = None
         self.pump_task: asyncio.Task[None] | None = None
+        # Language of the turn being answered.
+        self.language: str | None = None
         # Whether audio was sent since the user last spoke; if so a barge-in
         # tells the client to drop whatever it still has buffered.
         self.sent_audio = False
@@ -161,7 +165,7 @@ class _VoiceSession:
                 self.bench.mark("first_audio_ts")
                 self._send(ack_pcm, self.tts.sample_rate, "[ack]")
 
-        self.response_task = asyncio.create_task(self._respond(event.text.strip()))
+        self.response_task = asyncio.create_task(self._respond(event.text.strip(), event.language))
 
     # ----- interruption ---------------------------------------------
 
@@ -192,8 +196,9 @@ class _VoiceSession:
 
     # ----- response generation --------------------------------------
 
-    async def _respond(self, text: str) -> None:
+    async def _respond(self, text: str, language: str | None = None) -> None:
         self.bench.mark("prompt_sent_ts")
+        self.language = language
         self.history.append({"role": "user", "content": text})
         reply = ""
         try:
@@ -201,8 +206,9 @@ class _VoiceSession:
             if reply:
                 await self._speak(reply)
             else:
+                messages = with_reply_language(self.history, language) if self.settings.multilingual else self.history
                 generation = asyncio.create_task(
-                    self.service.llm.stream_tokens(self.history, self.token_queue, bench=self.bench)
+                    self.service.llm.stream_tokens(messages, self.token_queue, bench=self.bench)
                 )
                 try:
                     await self._speak_stream(generation)
@@ -224,13 +230,13 @@ class _VoiceSession:
         logger.info("Turn metrics: %s", metrics)
 
     def _action_reply(self, text: str) -> str:
-        intent = self.service.nlu.classify(text)
+        intent = {**self.service.nlu.classify(text), "spoken_language": self.language}
         result = self.service.actions.handle(text, intent)
         return result.response.strip() if result.handled else ""
 
     async def _speak(self, text: str) -> None:
         for sentence in sentence_chunks_from_tokens([text], max_tokens=self.settings.sentence_max_tokens):
-            await self.tts.synthesize_sentence(sentence)
+            await self.tts.synthesize_sentence(sentence, language=self.language)
 
     async def _speak_stream(self, generation: asyncio.Task[str]) -> None:
         tokens: list[str] = []
@@ -252,16 +258,16 @@ class _VoiceSession:
             if tok == EOS:
                 remaining = "".join(tokens).strip()
                 if remaining:
-                    await self.tts.synthesize_sentence(remaining)
+                    await self.tts.synthesize_sentence(remaining, language=self.language)
                 return
 
             tokens.append(tok)
             ready = sentence_chunks_from_tokens(tokens, max_tokens=self.settings.sentence_max_tokens)
-            if ready and (len(ready) > 1 or ready[-1].endswith((".", "!", "?"))):
+            if ready and (len(ready) > 1 or ends_sentence(ready[-1])):
                 for sentence in ready[:-1]:
-                    await self.tts.synthesize_sentence(sentence)
-                if ready[-1].endswith((".", "!", "?")):
-                    await self.tts.synthesize_sentence(ready[-1])
+                    await self.tts.synthesize_sentence(sentence, language=self.language)
+                if ends_sentence(ready[-1]):
+                    await self.tts.synthesize_sentence(ready[-1], language=self.language)
                     tokens = []
                 else:
                     tokens = [ready[-1]]
@@ -356,7 +362,7 @@ def _load_shared_asr_model(settings: Settings) -> Any:
             from faster_whisper import WhisperModel  # type: ignore
         except ImportError as exc:
             raise RuntimeError("faster-whisper is not installed. Install it with `pip install 'voice-assistant[whisper]'`.") from exc
-        return WhisperModel(settings.asr_model_path or "base.en", device="auto", compute_type="int8")
+        return WhisperModel(settings.whisper_model(), device="auto", compute_type="int8")
     if settings.asr_backend == "vosk":
         if not _VOSK_AVAILABLE:
             raise RuntimeError("vosk is not installed. Install it with `pip install 'voice-assistant[local]'`.")

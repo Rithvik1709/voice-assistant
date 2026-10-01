@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Multilingual conversations.** `ASR_LANGUAGE=auto` detects the language of every utterance with Whisper (99 languages), asks the LLM to reply in it, and speaks the reply with that language's Piper voice. `ASR_LANGUAGES` limits detection to the languages you speak.
+- `PIPER_VOICES_DIR`: a folder of Piper voices, one per language, loaded on first use. `PIPER_VOICE` stays the default voice.
+- `TTS_FALLBACK` for languages without a Piper voice: espeak-ng, the default voice, or silence.
+- `vaani models --languages hi,ta,ja` downloads multilingual Whisper `large-v3-turbo` and a Piper voice per language, and `--write-env` configures them.
+- `vaani doctor` reports the configured languages and any without a voice.
+- Text chat guesses the language from the writing system (Tamil, Devanagari, Han, kana, Hangul, Thai and others).
+
+### Changed
+
+- Sentences split at `।`, `。`, `！`, `？`, `؟`, `۔` and other non-Latin full stops, and Chinese and Japanese are chunked by characters, so speech starts early in those languages too.
+- Speech cleanup only turns symbols into English words ("40%" to "40 percent") for English; other languages keep the symbol for their voice to read.
+- Time, date, weather and greeting shortcuts skip requests spoken in languages other than English and Hindi, so the LLM answers them in the user's language.
+- With no `ASR_MODEL_PATH`, Whisper loads `large-v3-turbo` for any language other than English (still `base.en` for English). faster-whisper 1.1 or newer is required.
+
 ## Vaani 2.0.0 - 2026-09-26
 
 ### Upgrading from 1.0

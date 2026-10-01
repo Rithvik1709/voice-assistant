@@ -35,6 +35,7 @@ except ImportError:
 
 from voice_assistant.asr.partial import PartialTranscriptStabilizer
 from voice_assistant.asr.vad import VADConfig, VoiceActivityDetector
+from voice_assistant.lang import AUTO
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,8 @@ class ASREvent:
     confidence: float
     timestamp_ms: int
     speech_end_ts: float | None = None
+    # Language the user spoke (e.g. "hi"), when known.
+    language: str | None = None
 
 
 class _VoskRecognizer:
@@ -135,6 +138,16 @@ class _WhisperCppRecognizer:
         pass
 
 
+def default_whisper_model(language: str = "en") -> str:
+    """Whisper model used when ASR_MODEL_PATH is not set.
+
+    English gets the small, fast English-only model. Other languages need a
+    multilingual one; large-v3-turbo is accurate across Whisper's 99 languages
+    at a fraction of large-v3's cost.
+    """
+    return "base.en" if language == "en" else "large-v3-turbo"
+
+
 class _FasterWhisperRecognizer:
     """Whisper through CTranslate2: much more accurate than Vosk small.
 
@@ -142,6 +155,10 @@ class _FasterWhisperRecognizer:
     transcripts; the utterance is transcribed as soon as the endpoint fires.
     `model` is a local CTranslate2 model directory or a size name such as
     "base.en" or "small" (downloaded from Hugging Face on first use).
+
+    With language "auto" the language is detected on every utterance and
+    exposed as `last_language`. `allowed_languages` limits detection to the
+    languages the user is expected to speak.
     """
 
     streaming = False
@@ -149,7 +166,14 @@ class _FasterWhisperRecognizer:
     # otherwise invents text ("Thank you.") for noise.
     NO_SPEECH_THRESHOLD = 0.6
 
-    def __init__(self, model: str, sample_rate: int, language: str = "en", whisper_model: Any | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        sample_rate: int,
+        language: str = "en",
+        whisper_model: Any | None = None,
+        allowed_languages: tuple[str, ...] = (),
+    ) -> None:
         if whisper_model is None:
             try:
                 from faster_whisper import WhisperModel  # type: ignore
@@ -157,11 +181,18 @@ class _FasterWhisperRecognizer:
                 raise RuntimeError(
                     "faster-whisper is not installed. Install it with `pip install 'voice-assistant[whisper]'`."
                 ) from exc
-            whisper_model = WhisperModel(model or "base.en", device="auto", compute_type="int8")
+            whisper_model = WhisperModel(model or default_whisper_model(language), device="auto", compute_type="int8")
         if sample_rate != 16_000:
             raise ValueError("faster-whisper expects 16 kHz audio")
         self.model = whisper_model
-        self.language = language or None
+        self.allowed_languages = tuple(allowed_languages)
+        detect = not language or language == AUTO
+        if detect and len(self.allowed_languages) == 1:
+            # Nothing to choose between: skip detection.
+            language, detect = self.allowed_languages[0], False
+        # None asks Whisper to detect the language.
+        self.language: str | None = None if detect else language
+        self.last_language: str | None = self.language
 
     def accept_waveform(self, audio_bytes: bytes) -> None:
         pass
@@ -173,29 +204,55 @@ class _FasterWhisperRecognizer:
         if not utterance:
             return "", 0.0
         audio = np.frombuffer(utterance, dtype=np.int16).astype(np.float32) / 32768.0
-        segments, _info = self.model.transcribe(
+        segments, info = self._transcribe(audio, self.language)
+        language = self.language
+        if language is None:
+            language = getattr(info, "language", None)
+            if self.allowed_languages and language not in self.allowed_languages:
+                # Detected something the user does not speak (common for short
+                # utterances): decode again as the likeliest allowed language.
+                language = self._likeliest_allowed(info)
+                segments, info = self._transcribe(audio, language)
+        kept = [seg for seg in segments if seg.no_speech_prob < self.NO_SPEECH_THRESHOLD]
+        text = " ".join(seg.text.strip() for seg in kept).strip()
+        confidence = float(np.exp(np.mean([seg.avg_logprob for seg in kept]))) if kept else 0.0
+        if text:
+            self.last_language = language
+        return text, confidence
+
+    def _transcribe(self, audio: np.ndarray, language: str | None) -> tuple[Any, Any]:
+        return self.model.transcribe(
             audio,
-            language=self.language,
+            language=language,
             beam_size=1,
             vad_filter=False,  # Vaani's VAD already cut the utterance
             condition_on_previous_text=False,
             without_timestamps=True,
         )
-        kept = [seg for seg in segments if seg.no_speech_prob < self.NO_SPEECH_THRESHOLD]
-        text = " ".join(seg.text.strip() for seg in kept).strip()
-        confidence = float(np.exp(np.mean([seg.avg_logprob for seg in kept]))) if kept else 0.0
-        return text, confidence
+
+    def _likeliest_allowed(self, info: Any) -> str:
+        probs = dict(getattr(info, "all_language_probs", None) or [])
+        return max(self.allowed_languages, key=lambda code: probs.get(code, 0.0))
 
     def reset(self) -> None:
         pass
 
 
-def load_recognizer(backend: str, model_path: str, sample_rate: int, language: str = "en", shared: Any = None) -> Any:
+def load_recognizer(
+    backend: str,
+    model_path: str,
+    sample_rate: int,
+    language: str = "en",
+    shared: Any = None,
+    allowed_languages: tuple[str, ...] = (),
+) -> Any:
     """Create the recognizer for `backend`, optionally reusing a loaded model."""
     if backend == "vosk":
         return _VoskRecognizer(model_path, sample_rate, model=shared)
     if backend == "whisper":
-        return _FasterWhisperRecognizer(model_path, sample_rate, language=language, whisper_model=shared)
+        return _FasterWhisperRecognizer(
+            model_path, sample_rate, language=language, whisper_model=shared, allowed_languages=allowed_languages
+        )
     if backend == "whispercpp":
         return _WhisperCppRecognizer(model_path, sample_rate)
     raise ValueError(f"Unsupported ASR backend: {backend}")
@@ -214,6 +271,7 @@ class StreamingASR:
         recognizer: Any | None = None,
         hold_silence_ms: int | None = None,
         language: str = "en",
+        allowed_languages: tuple[str, ...] = (),
     ) -> None:
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
@@ -246,10 +304,12 @@ class StreamingASR:
         self._last_speech_ts = 0.0
         self._last_partial = ""
         self._latest_words = ""
-        self._latest_words = ""
+        # A fixed language is reported on every transcript; with "auto" the
+        # recognizer says what it detected.
+        self.language = None if language == AUTO else language
 
         self._rec = recognizer if recognizer is not None else load_recognizer(
-            backend, model_path, sample_rate, language=language
+            backend, model_path, sample_rate, language=language, allowed_languages=allowed_languages
         )
 
     def _mic_callback(
@@ -361,6 +421,7 @@ class StreamingASR:
                         conf,
                         int(time.time() * 1000),
                         speech_end_ts=self._last_speech_ts,
+                        language=getattr(self._rec, "last_language", None) or self.language,
                     )
                 )
         self.reset()
