@@ -34,12 +34,12 @@ dependencies = [
 
 [project.optional-dependencies]
 local = [
-    "faster-whisper>=1.0.0",
+    "faster-whisper>=1.1.0",
     "vosk>=0.3.44",
     "llama-cpp-python>=0.3.0",
     "piper-tts>=1.2.0",
 ]
-whisper = ["faster-whisper>=1.0.0"]
+whisper = ["faster-whisper>=1.1.0"]
 silero = ["silero-vad>=5.1.2"]
 webrtc = ["aiortc>=1.7.0"]
 otel = [

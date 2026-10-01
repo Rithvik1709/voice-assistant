@@ -26,10 +26,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--download", action="store_true", help="models: download the starter model set")
     p.add_argument("--write-env", action="store_true", help="models: write a .env pointing at the models")
     p.add_argument("--env-file", default=".env", help="models: path of the .env file to write")
+    p.add_argument(
+        "--languages",
+        default="",
+        help="models: languages to set up besides English, e.g. hi,ta,ja (a voice each, multilingual Whisper)",
+    )
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = p.parse_args(argv)
     if args.mode and args.mode_arg and args.mode != args.mode_arg:
         p.error(f"conflicting modes: --mode {args.mode} and {args.mode_arg}")
+    from voice_assistant.lang import LANGUAGE_NAMES, parse_language_list
+
+    args.languages = parse_language_list(args.languages)
+    unknown = [code for code in args.languages if code not in LANGUAGE_NAMES]
+    if unknown:
+        p.error(f"unknown language codes: {', '.join(unknown)} (use codes such as hi, ta, fr, ja)")
     args.mode = args.mode or args.mode_arg or "local"
     return args
 
@@ -46,7 +57,7 @@ async def run_local(settings: Settings) -> None:
     from voice_assistant.pipeline.orchestrator import VoicePipelineOrchestrator
     from voice_assistant.tts.player import AudioPlayer
     from voice_assistant.tts.queue import AudioChunkQueue
-    from voice_assistant.tts.stream import PiperConfig, PiperStreamingTTS
+    from voice_assistant.tts.stream import PiperStreamingTTS
 
     bench = BenchmarkTracker()
     vad = VoiceActivityDetector(
@@ -62,19 +73,20 @@ async def run_local(settings: Settings) -> None:
         sample_rate=settings.sample_rate,
         chunk_size=settings.chunk_size,
         vad=vad,
-        model_path=settings.asr_model_path,
         backend=settings.asr_backend,
         endpoint_silence_ms=settings.asr_endpoint_silence_ms,
         speech_start_frames=settings.barge_in_frames,
         hold_silence_ms=settings.asr_hold_silence_ms,
         language=settings.asr_language,
+        allowed_languages=settings.asr_languages,
+        model_path=settings.whisper_model() if settings.asr_backend == "whisper" else settings.asr_model_path,
     )
 
     llm = create_llm(settings, bench=bench)
 
     queue = AudioChunkQueue(maxsize=settings.tts_queue_maxsize)
     tts = PiperStreamingTTS(
-        PiperConfig(settings.piper_voice_path, settings.tts_sample_rate),
+        settings.piper_config(),
         playback_queue=queue,
         bench=bench,
     )
@@ -103,6 +115,7 @@ async def run_local(settings: Settings) -> None:
         ack_tone_ms=settings.ack_tone_ms if settings.enable_ack_tone else 0,
         max_conversation_turns=settings.conversation_history_turns,
         barge_in=settings.enable_barge_in,
+        reply_in_user_language=settings.multilingual,
     )
     await warm_up_llm(llm, settings.assistant_system_prompt)
     await orchestrator.run()
@@ -134,15 +147,15 @@ async def amain(args: argparse.Namespace) -> None:
         )
 
         models_dir = Path(args.models_dir)
-        print(format_model_plan(models_dir))
+        print(format_model_plan(models_dir, args.languages))
 
         if args.write_env:
-            wrote = write_env_file(Path(args.env_file), models_dir)
+            wrote = write_env_file(Path(args.env_file), models_dir, languages=args.languages)
             status = "wrote" if wrote else "kept existing"
             print(f"{status}: {args.env_file}")
 
         if args.download:
-            for message in download_recommended_models(models_dir):
+            for message in download_recommended_models(models_dir, args.languages):
                 print(message)
         return
 

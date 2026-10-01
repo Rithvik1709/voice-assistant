@@ -15,6 +15,7 @@ from opentelemetry import trace
 from voice_assistant.actions import ActionHandler
 from voice_assistant.audio import make_ack_tone
 from voice_assistant.benchmark import BenchmarkTracker
+from voice_assistant.lang import CLAUSE_CHARS, SENTENCE_END_CHARS, count_words, with_reply_language
 from voice_assistant.llm.client import StreamingLLMClient
 from voice_assistant.memory import SessionMemory
 from voice_assistant.tts.queue import AudioChunk, AudioChunkQueue, safe_put
@@ -34,6 +35,17 @@ class EndOfTurn:
     """Marks the end of one turn's tokens in the token queue."""
 
     turn: int
+
+
+@dataclass(frozen=True, slots=True)
+class StartOfTurn:
+    """Precedes a turn's tokens in the token queue: the language to speak them in."""
+
+    language: str | None
+
+
+# Token endings after which an early TTS chunk may be cut.
+_EAGER_BOUNDARIES = (" ", "\n", *SENTENCE_END_CHARS, *CLAUSE_CHARS)
 
 
 class VoicePipelineOrchestrator:
@@ -56,6 +68,7 @@ class VoicePipelineOrchestrator:
         barge_in: bool = True,
         on_reply_token: Callable[[str], None] | None = None,
         on_turn_end: Callable[[], None] | None = None,
+        reply_in_user_language: bool = False,
     ) -> None:
         self.asr = asr
         self.llm = llm
@@ -70,10 +83,12 @@ class VoicePipelineOrchestrator:
         # Optional observers, used by text chat mode to print replies.
         self.on_reply_token = on_reply_token
         self.on_turn_end = on_turn_end
+        # Ask the LLM to answer in the language each question was asked in.
+        self.reply_in_user_language = reply_in_user_language
 
         self.partial_queue: asyncio.Queue[ASREvent] = asyncio.Queue(maxsize=64)
-        self.prompt_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
-        self.token_queue: asyncio.Queue[str | EndOfTurn] = asyncio.Queue(maxsize=256)
+        self.prompt_queue: asyncio.Queue[str | tuple[str, str | None]] = asyncio.Queue(maxsize=8)
+        self.token_queue: asyncio.Queue[str | StartOfTurn | EndOfTurn] = asyncio.Queue(maxsize=256)
         self.audio_queue: AudioChunkQueue = tts.playback_queue
         self.nlu = nlu
         self.action_handler = action_handler
@@ -92,6 +107,8 @@ class VoicePipelineOrchestrator:
         self._finish_task: asyncio.Task[None] | None = None
         self._token_buf: list[str] = []
         self._reply_tokens: list[str] = []
+        # Language of the reply being spoken (set by StartOfTurn).
+        self._speak_language: str | None = None
 
     @property
     def is_responding(self) -> bool:
@@ -110,12 +127,15 @@ class VoicePipelineOrchestrator:
                 continue
 
             if event.type == "final" and event.text.strip():
-                logger.info("User: %s", event.text)
+                if event.language:
+                    logger.info("User (%s): %s", event.language, event.text)
+                else:
+                    logger.info("User: %s", event.text)
                 self.bench.reset()
                 if event.speech_end_ts is not None:
                     self.bench.current.speech_end_ts = event.speech_end_ts
                 self.bench.mark("final_text_ts")
-                await self.prompt_queue.put(event.text)
+                await self.prompt_queue.put((event.text, event.language))
 
     def _offer_partial(self, event: ASREvent) -> None:
         # Keep the queue non-blocking and prefer the freshest partials.
@@ -131,8 +151,9 @@ class VoicePipelineOrchestrator:
 
     async def llm_task(self) -> None:
         while True:
-            prompt = await self.prompt_queue.get()
-            task = asyncio.create_task(self._respond(prompt))
+            item = await self.prompt_queue.get()
+            prompt, language = item if isinstance(item, tuple) else (item, None)
+            task = asyncio.create_task(self._respond(prompt, language))
             self._response_task = task
             try:
                 # asyncio.wait does not raise when `task` is cancelled by an
@@ -144,16 +165,21 @@ class VoicePipelineOrchestrator:
             if not task.cancelled() and task.exception() is not None:
                 logger.error("Response failed", exc_info=task.exception())
 
-    async def _respond(self, prompt: str) -> None:
+    async def _respond(self, prompt: str, language: str | None = None) -> None:
         with tracer.start_as_current_span("orchestrator.process_prompt") as span:
             span.set_attribute("prompt.length", len(prompt))
+            if language:
+                span.set_attribute("prompt.language", language)
             turn = self._begin_response()
+            await self.token_queue.put(StartOfTurn(language))
 
             intent: dict[str, object] | None = None
             if self.nlu is not None:
                 try:
                     intent = self.nlu.classify(prompt)
                     if isinstance(intent, dict):
+                        # Actions answer in English and Hindi only; they skip other languages.
+                        intent = {**intent, "spoken_language": language}
                         span.set_attribute("nlu.intent", str(intent.get("intent", "")))
                         span.set_attribute("nlu.confidence", float(intent.get("confidence", 0.0)))
                 except Exception:
@@ -178,7 +204,10 @@ class VoicePipelineOrchestrator:
                             self._add_message("assistant", response)
                         return
 
-                reply = await self.llm.stream_tokens(self.conversation_history, self.token_queue)
+                messages = self.conversation_history
+                if self.reply_in_user_language:
+                    messages = with_reply_language(messages, language)
+                reply = await self.llm.stream_tokens(messages, self.token_queue)
                 self._add_message("assistant", reply)
             except asyncio.CancelledError:
                 # Interrupted: remember what the user actually heard.
@@ -198,6 +227,10 @@ class VoicePipelineOrchestrator:
         while True:
             token = await self.token_queue.get()
             generation = self._generation
+
+            if isinstance(token, StartOfTurn):
+                self._speak_language = token.language
+                continue
 
             if isinstance(token, EndOfTurn):
                 for sentence in sentence_chunks_from_tokens(self._token_buf):
@@ -394,7 +427,7 @@ class VoicePipelineOrchestrator:
         retries: int = 2,
     ) -> None:
         for attempt in range(retries + 1):
-            if await self.tts.synthesize_sentence(sentence):
+            if await self.tts.synthesize_sentence(sentence, language=self._speak_language):
                 return
 
             if attempt < retries:
@@ -419,10 +452,8 @@ class VoicePipelineOrchestrator:
         if not text:
             return False
 
-        word_count = len(text.split())
-        boundary = latest_token.endswith(
-            (" ", "\n", ".", ",", "!", "?", ";", ":")
-        )
+        word_count = count_words(text)
+        boundary = latest_token.endswith(_EAGER_BOUNDARIES)
 
         return (
             word_count >= self.tts_eager_min_words

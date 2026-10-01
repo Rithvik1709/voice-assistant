@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from voice_assistant.config import Settings
+from voice_assistant.lang import language_name
 
 
 @dataclass(slots=True)
@@ -125,6 +126,55 @@ def _llm_server_check(settings: Settings) -> DoctorCheck:
     return DoctorCheck("llm_server", True, f"{settings.llm_base_url} serving {settings.llm_model}")
 
 
+def _language_checks(settings: Settings) -> list[DoctorCheck]:
+    """Which languages Vaani listens for, and which voice speaks each one."""
+    from voice_assistant.tts.voices import VoiceRouter
+
+    if settings.asr_language == "auto":
+        expected = list(settings.asr_languages)
+        detail = "detected per utterance" + (f" from {', '.join(expected)}" if expected else " (any of 99)")
+    else:
+        expected = [settings.asr_language]
+        detail = f"{language_name(settings.asr_language) or settings.asr_language} only"
+    checks = [DoctorCheck("languages", True, detail)]
+
+    router = VoiceRouter(
+        Path(settings.piper_voice).expanduser() if settings.piper_voice else None,
+        Path(settings.piper_voices_dir).expanduser() if settings.piper_voices_dir else None,
+    )
+    if settings.piper_voices_dir:
+        found = ", ".join(router.languages) or "none"
+        checks.append(DoctorCheck("voices", bool(router.languages), f"{settings.piper_voices_dir}: {found}"))
+    if router.default_voice is not None and router.default_language is None and settings.multilingual:
+        checks.append(DoctorCheck(
+            "voice_coverage", False,
+            f"cannot tell the language of {router.default_voice.name}, so it speaks every language; "
+            "use a Piper voice with a language in its .onnx.json, or PIPER_VOICES_DIR",
+        ))
+        return checks
+
+    fallback = settings.tts_fallback
+    if fallback == "auto":
+        fallback = "espeak" if shutil.which("espeak-ng") else "default"
+    unvoiced = [code for code in expected if router.voice_for(code) is None]
+    if unvoiced:
+        names = ", ".join(language_name(code) or code for code in unvoiced)
+        if fallback == "espeak":
+            ok = shutil.which("espeak-ng") is not None
+            how = "espeak-ng" if ok else "espeak-ng, which is not installed"
+        else:
+            ok = False
+            how = "the default voice (wrong accent)" if fallback == "default" else "nothing (TTS_FALLBACK=none)"
+        checks.append(DoctorCheck(
+            "voice_coverage", ok,
+            f"no Piper voice for {names}; spoken by {how}. Run `vaani models --languages "
+            f"{','.join(unvoiced)} --download` or install espeak-ng",
+        ))
+    elif settings.multilingual:
+        checks.append(DoctorCheck("voice_coverage", True, "every expected language has a Piper voice"))
+    return checks
+
+
 def _config_check(settings: Settings) -> DoctorCheck:
     problems = settings.check_ranges()
     if problems:
@@ -154,12 +204,19 @@ def run_doctor(settings: Settings, check_audio: bool = True) -> list[DoctorCheck
         ),
         _piper_check(),
         (
-            DoctorCheck("asr_model", True, f"whisper {settings.asr_model_path or 'base.en'}")
-            if settings.asr_backend == "whisper" and not Path(settings.asr_model_path).expanduser().exists()
+            DoctorCheck("asr_model", True, f"whisper {settings.whisper_model()}")
+            if settings.asr_backend == "whisper"
+            and (not settings.asr_model_path or not Path(settings.asr_model_path).expanduser().exists())
             else _path_check("asr_model", settings.asr_model_path, settings.asr_backend in {"vosk", "whispercpp"})
         ),
-        _path_check("piper_voice", settings.piper_voice),
-        _path_check("piper_config", f"{settings.piper_voice}.json" if settings.piper_voice else ""),
+        # PIPER_VOICES_DIR can stand in for a single default voice.
+        _path_check("piper_voice", settings.piper_voice, required=not settings.piper_voices_dir),
+        _path_check(
+            "piper_config",
+            f"{settings.piper_voice}.json" if settings.piper_voice else "",
+            required=not settings.piper_voices_dir,
+        ),
+        *_language_checks(settings),
         _port_check(settings.grpc_port),
     ]
 

@@ -10,6 +10,7 @@ It can also run as a gRPC server for remote clients, or as a text chat when you 
 - **Fast answers for simple things:** time, date, greetings, and (optionally) live weather are answered instantly without the LLM.
 - **Speaks like a person, not a screen:** markdown, lists, code, links, and emoji are never read aloud.
 - **English and Hinglish:** the intent layer understands requests like "gaana chala do" and "delhi ka mausam batao".
+- **60+ languages, offline:** with `ASR_LANGUAGE=auto`, Vaani detects the language you speak on every turn, the LLM answers in it, and a matching Piper voice speaks it. See [Languages](#languages).
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in 2.0.0, including how to upgrade from 1.0.
 
@@ -17,6 +18,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in 2.0.0, including how to upg
 
 - [Quickstart](#quickstart)
 - [Ways to run Vaani](#ways-to-run-vaani)
+- [Languages](#languages)
 - [How it works](#how-it-works)
 - [Configuration](#configuration)
 - [Models](#models)
@@ -107,6 +109,26 @@ Whisper transcribes each utterance when you stop talking, so its decode time is 
 
 `MOCK_MODELS=1` replaces speech recognition, the LLM, and TTS with lightweight stand-ins. It works with `chat` and `server`, needs only the core install, and is what CI and the benchmarks use.
 
+## Languages
+
+Vaani speaks English out of the box. To talk to it in other languages, set up the languages you need once (this is the only step that needs the internet), then it runs offline:
+
+```bash
+vaani models --languages hi,ta,fr,ja --download --write-env
+vaani doctor     # shows which languages have a voice
+vaani local
+```
+
+This fetches multilingual Whisper `large-v3-turbo` and one Piper voice per language into `models/voices/`, and writes a `.env` with `ASR_LANGUAGE=auto` and `ASR_LANGUAGES=en,hi,ta,fr,ja`. Every turn then works like this:
+
+1. **Listening.** Whisper detects the language of each utterance. `ASR_LANGUAGES` limits detection to the languages you actually speak, which matters because a short "ok" is easily mistaken for another language. Without it, any of Whisper's 99 languages can be detected.
+2. **Thinking.** The LLM is asked to reply in the language you spoke. The default 0.5B model handles this poorly, so use a multilingual model: a Qwen2.5 7B or Gemma 3 GGUF as `MODEL_PATH`, or any server through `LLM_BACKEND=openai`.
+3. **Speaking.** The reply is cut into sentences at that language's punctuation (`।`, `。`, `؟` and others). Chinese and Japanese are chunked by characters, since they have no spaces. The voice for the language in `PIPER_VOICES_DIR` speaks it, and `PIPER_VOICE` stays the default.
+
+Piper has voices for about 40 languages. For the rest, `TTS_FALLBACK` decides what happens: `auto` (the default) uses [espeak-ng](https://github.com/espeak-ng/espeak-ng) if it is installed (robotic, but it speaks over 100 languages: `brew install espeak-ng` or `apt-get install espeak-ng`) and the default voice otherwise. Set `espeak`, `default`, or `none` (stay silent) to choose one.
+
+Time, date, weather and greeting shortcuts answer in English and Hindi only. Requests in other languages go to the LLM. In `vaani chat`, the language is guessed from the writing system: Tamil script is Tamil, but Latin-script text could be many languages and is left to the LLM.
+
 ## How it works
 
 ```text
@@ -161,12 +183,15 @@ Settings come from environment variables or a `.env` file. `vaani models --write
 | --- | --- | --- |
 | `MODEL_PATH` | | GGUF model for the LLM (required) |
 | `PIPER_VOICE` | | Piper `.onnx` voice, with its `.onnx.json` next to it (required for speech) |
-| `ASR_MODEL_PATH` | `base.en` | Whisper model folder or size name (`base.en`, `small.en`, `small`), or a Vosk model folder |
+| `ASR_MODEL_PATH` | `base.en` (`large-v3-turbo` for other languages) | Whisper model folder or size name (`base.en`, `small.en`, `small`), or a Vosk model folder |
 | `ASSISTANT_SYSTEM_PROMPT` | concise spoken style | Instructions for the LLM |
 | `LLM_BACKEND` | `llama` | `llama` runs `MODEL_PATH` in-process; `openai` uses an OpenAI-compatible server |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | | Server URL (ending in `/v1`), model name, and optional key for the `openai` backend |
 | `ASR_BACKEND` | `whisper` | `whisper` (accurate) or `vosk` (fast, live partials, less accurate) |
-| `ASR_LANGUAGE` | `en` | Language for Whisper, e.g. `hi` (use a multilingual model such as `small`) |
+| `ASR_LANGUAGE` | `en` | Language for Whisper, e.g. `hi`, or `auto` to detect it on every utterance and reply in it (see [Languages](#languages)) |
+| `ASR_LANGUAGES` | | With `auto`: the languages detection may choose from, e.g. `en,hi,ta` |
+| `PIPER_VOICES_DIR` | | Folder of Piper voices, one per language; the voice is picked by each reply's language |
+| `TTS_FALLBACK` | `auto` | For languages without a voice: `espeak`, `default` (the default voice), `none`, or `auto` (espeak-ng if installed, else the default voice) |
 | `ASR_ENDPOINT_SILENCE_MS` | `400` | Silence that ends an utterance. Lower is snappier but may cut sentences at natural pauses. |
 | `ASR_HOLD_SILENCE_MS` | `1000` | Longer silence allowed when your words so far end on "and", "the", "um" and similar (Vosk only) |
 | `ENABLE_BARGE_IN` | `1` | Let speech interrupt Vaani; `0` mutes the mic while it speaks |
@@ -202,7 +227,9 @@ Settings come from environment variables or a `.env` file. `vaani models --write
 
 **Speech.** Any [Piper voice](https://huggingface.co/rhasspy/piper-voices) works; the sample rate is read from its `.onnx.json`. With the `piper-tts` package installed, voices load once and run in-process; otherwise the `piper` binary on `PATH` is used.
 
-**Recognition.** Any Whisper size works (`small.en` is more accurate, multilingual `small` handles Hindi with `ASR_LANGUAGE=hi`), and so does any [Vosk model](https://alphacephei.com/vosk/models) with `ASR_BACKEND=vosk`.
+**Recognition.** Any Whisper size works (`small.en` is more accurate; for other languages use a multilingual size such as `large-v3-turbo` or the faster but weaker `small`), and so does any [Vosk model](https://alphacephei.com/vosk/models) with `ASR_BACKEND=vosk` (one language per model, no `auto`).
+
+With `vaani models --languages ...`, multilingual Whisper `large-v3-turbo` (~1.6 GB) replaces `base.en`, and one Piper voice per language (~60 MB each) is added under `models/voices/`.
 
 Check the license of any replacement model before redistributing it.
 
@@ -277,6 +304,8 @@ Start with `vaani doctor`: it names the failing piece and how to fix it.
 - **Sentences get cut off halfway.** Raise `ASR_ENDPOINT_SILENCE_MS`, for example to 500.
 - **Vaani mishears you.** Use a larger Whisper model (`ASR_MODEL_PATH=small.en`), and check `vaani doctor` shows the right microphone.
 - **Answers are shallow or wrong.** Use a bigger model, locally or through `LLM_BACKEND=openai`.
+- **Vaani answers in the wrong language.** Set `ASR_LANGUAGES` to the languages you speak, so short utterances are not detected as something else. If the language is right but the reply is not, the LLM is too small for that language.
+- **A language is spoken with the wrong accent, or not at all.** `vaani doctor` lists languages without a Piper voice. Fetch one with `vaani models --languages <code> --download`, or install espeak-ng.
 - **`llama-cpp-python` build fails with `Undefined symbols ... X509`.** An x86_64 OpenSSL in `/usr/local/lib` (old Intel Homebrew) is being linked. Build without it: `CMAKE_ARGS="-DLLAMA_OPENSSL=OFF -DLLAMA_CURL=OFF" pip install llama-cpp-python`.
 - **Replies are slow.** Offload the LLM to your GPU (`[cuda]` or `[metal]` extra, `N_GPU_LAYERS=-1`), use a smaller model, or set `VAANI_PROFILE=low_latency`.
 - **`llama-cpp-python` fails to build.** Install a prebuilt wheel: `pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu`.
@@ -287,7 +316,7 @@ Start with `vaani doctor`: it names the failing piece and how to fix it.
 - Wake word, so Vaani listens only when called
 - Echo cancellation for barge-in on laptop speakers
 - Music and smart-home actions
-- Multilingual speech recognition and voices (Hindi first)
+- Translated replies for the time, date and weather shortcuts
 - WebRTC transport for browser clients
 
 ## License

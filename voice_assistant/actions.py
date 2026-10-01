@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from voice_assistant.lang import base_language
 from voice_assistant.weather import WeatherProvider, extract_city
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,13 @@ class BasicIntentActions:
 
     Greetings are only short-circuited for short utterances so that
     "hi, can you explain black holes" still reaches the LLM.
+
+    The replies are English, and the keywords English and Hindi, so requests
+    spoken in any other language (intent["spoken_language"]) go to the LLM,
+    which answers in that language.
     """
+
+    LANGUAGES = frozenset({"en", "hi"})
 
     def __init__(
         self,
@@ -48,6 +55,10 @@ class BasicIntentActions:
         confidence = float(intent.get("confidence", 0.0))  # type: ignore[arg-type]
 
         if confidence < self.min_confidence:
+            return ActionResult(False)
+
+        spoken = base_language(str(intent.get("spoken_language") or ""))
+        if spoken is not None and spoken not in self.LANGUAGES:
             return ActionResult(False)
 
         if name == "greeting":

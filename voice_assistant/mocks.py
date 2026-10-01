@@ -71,7 +71,7 @@ class MockPiperStreamingTTS:
     async def stop(self) -> None:
         pass
 
-    async def synthesize_sentence(self, sentence: str) -> bool:
+    async def synthesize_sentence(self, sentence: str, language: str | None = None) -> bool:
         # 100ms of 22050Hz 16-bit mono silence per sentence.
         pcm16 = b"\x00\x00" * 2205
         chunk = AudioChunk(pcm16=pcm16, sample_rate=self.sample_rate, debug_text=sentence)
